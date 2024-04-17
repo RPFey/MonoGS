@@ -1,3 +1,6 @@
+import matplotlib
+matplotlib.use('Agg')  # Use a non-interactive backend
+
 import os
 import sys
 import time
@@ -12,7 +15,7 @@ from munch import munchify
 import wandb
 from gaussian_splatting.scene.gaussian_model import GaussianModel
 from gaussian_splatting.utils.system_utils import mkdir_p
-from gui import gui_utils, slam_gui
+# from gui import gui_utils, slam_gui
 from utils.config_utils import load_config
 from utils.dataset import load_dataset
 from utils.eval_utils import eval_ate, eval_rendering, save_gaussians
@@ -92,13 +95,13 @@ class SLAM:
 
         self.backend.set_hyperparams()
 
-        self.params_gui = gui_utils.ParamsGUI(
-            pipe=self.pipeline_params,
-            background=self.background,
-            gaussians=self.gaussians,
-            q_main2vis=q_main2vis,
-            q_vis2main=q_vis2main,
-        )
+        # self.params_gui = gui_utils.ParamsGUI(
+        #     pipe=self.pipeline_params,
+        #     background=self.background,
+        #     gaussians=self.gaussians,
+        #     q_main2vis=q_main2vis,
+        #     q_vis2main=q_vis2main,
+        # )
 
         backend_process = mp.Process(target=self.backend.run)
         if self.use_gui:

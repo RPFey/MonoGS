@@ -14,3 +14,6 @@ datasets
 wandb
 
 result*
+
+environment.yml
+requirements.txt
