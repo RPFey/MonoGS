@@ -62,6 +62,8 @@ class Camera(nn.Module):
 
         self.projection_matrix = projection_matrix.to(device=device)
 
+        self.covisibile_frame_idx = {}
+
     @staticmethod
     def init_from_dataset(dataset, idx, projection_matrix):
         gt_color, gt_depth, gt_pose = dataset[idx]

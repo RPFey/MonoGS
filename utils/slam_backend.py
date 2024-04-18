@@ -4,6 +4,8 @@ import time
 import torch
 import torch.multiprocessing as mp
 from tqdm import tqdm
+from typing import List, Dict
+from queue import Queue
 
 from gaussian_splatting.gaussian_renderer import render
 from gaussian_splatting.utils.loss_utils import l1_loss, ssim
@@ -11,6 +13,7 @@ from utils.logging_utils import Log
 from utils.multiprocessing_utils import clone_obj
 from utils.pose_utils import update_pose
 from utils.slam_utils import get_loss_mapping
+from utils.camera_utils import Camera
 
 
 class BackEnd(mp.Process):
@@ -33,8 +36,8 @@ class BackEnd(mp.Process):
         self.iteration_count = 0
         self.last_sent = 0
         self.occ_aware_visibility = {}
-        self.viewpoints = {}
-        self.current_window = []
+        self.viewpoints: Dict[int, Camera] = {}
+        self.current_window: List[int] = []
         self.initialized = not self.monocular
         self.keyframe_optimizers = None
 
@@ -63,6 +66,7 @@ class BackEnd(mp.Process):
             if "single_thread" in self.config["Dataset"]
             else False
         )
+        self.covisible_method = "n_touch"
 
     def add_next_kf(self, frame_idx, viewpoint, init=False, scale=2.0, depth_map=None):
         self.gaussians.extend_from_pcd_seq(
@@ -377,6 +381,7 @@ class BackEnd(mp.Process):
                 if self.single_thread:
                     time.sleep(0.01)
                     continue
+                
                 self.map(self.current_window)
                 if self.last_sent >= 10:
                     self.map(self.current_window, prune=True, iters=10)
@@ -431,11 +436,16 @@ class BackEnd(mp.Process):
                             Log("Performing initial BA for initialization")
                         else:
                             iter_per_kf = self.mapping_itr_num
-                    for cam_idx in range(len(self.current_window)):
-                        if self.current_window[cam_idx] == 0:
+
+                    local_window = self.construct_local_graph(cur_frame_idx, 0.5)
+                    print(" Local Map Window: ", local_window)
+
+                    # extract frames in current window
+                    for cam_num, cam_idx in enumerate(local_window):
+                        if cam_idx == 0:
                             continue
-                        viewpoint = self.viewpoints[current_window[cam_idx]]
-                        if cam_idx < frames_to_optimize:
+                        viewpoint = self.viewpoints[cam_idx]
+                        if cam_num < frames_to_optimize:
                             opt_params.append(
                                 {
                                     "params": [viewpoint.cam_rot_delta],
@@ -470,8 +480,8 @@ class BackEnd(mp.Process):
                         )
                     self.keyframe_optimizers = torch.optim.Adam(opt_params)
 
-                    self.map(self.current_window, iters=iter_per_kf)
-                    self.map(self.current_window, prune=True)
+                    self.map(local_window, iters=iter_per_kf)
+                    self.map(local_window, prune=True)                    
                     self.push_to_frontend("keyframe")
                 else:
                     raise Exception("Unprocessed data", data)
@@ -480,3 +490,93 @@ class BackEnd(mp.Process):
         while not self.frontend_queue.empty():
             self.frontend_queue.get()
         return
+
+    def pose_graph_optimization(self, local_graph=False):
+        # optimize for the pose graph
+        pass
+
+    def loop_detection(self):
+        """ Detect loops in the new keyframe """
+        pass
+
+    def ntouch_covisibility(self, f_idx1, f_idx2):
+        # compute the covisibility score between two frames
+        render_pkg1 = render(
+            self.viewpoints[f_idx1], self.gaussians, self.pipeline_params, self.background
+        )
+        f1_visibility = (render_pkg1["n_touched"] > 0).long()
+
+        render_pkg2 = render(
+            self.viewpoints[f_idx2], self.gaussians, self.pipeline_params, self.background
+        )
+        f2_visibility = (render_pkg2["n_touched"] > 0).long()
+
+        union = torch.logical_or(
+            f1_visibility, f2_visibility
+        ).count_nonzero()
+        intersection = torch.logical_and(
+            f1_visibility, f2_visibility
+        ).count_nonzero()
+
+        return intersection / union
+    
+    def ntouch_kl_covisibility(self, f_idx1, f_idx2):
+        # compute the covisibility score between two frames
+        # using the KL divergence of n_touch
+        render_pkg1 = render(
+            self.viewpoints[f_idx1], self.gaussians, self.pipeline_params, self.background
+        )
+        visibility_dist1 = render_pkg1["n_touch"].float() / render_pkg1["n_touched"].sum()
+
+        render_pkg2 = render(
+            self.viewpoints[f_idx2], self.gaussians, self.pipeline_params, self.background
+        )
+        visibility_dist2 = render_pkg2["n_touch"].float() / render_pkg2["n_touched"].sum()
+
+        score = ( - visibility_dist2 * torch.log(visibility_dist1 / visibility_dist2)).sum()
+
+        return score
+    
+    def viewdir_covisibility(self, f_idx1, f_idx2):
+        """ Use the viewdir of gaussians as a measure of covisibility """
+        pass
+    
+    def compute_covisibility(self, f_idx1, f_idx2):
+        # compute the covisibility score between two frames
+        if self.covisible_method == "n_touch":
+            return self.ntouch_covisibility(f_idx1, f_idx2)
+        else:
+            raise NotImplementedError("Method not implemented")
+
+    def construct_local_graph(self, cur_frame_idx, covisible_thresh=0.9):
+        """ Construct the local graph for the current frame using the covisibility score """
+        # construct the local graph
+        local_window = set()
+        local_window.add(cur_frame_idx)
+
+        # store visited nodes
+        visited = set()
+        visited.add(cur_frame_idx)
+
+        bfs_queue = Queue()
+        for f_idx in self.current_window[1:]:
+            bfs_queue.put(f_idx)
+        
+        while not bfs_queue.empty():
+            f_idx = bfs_queue.get()
+            visited.add(f_idx)
+            
+            covisibility = self.compute_covisibility(cur_frame_idx, f_idx)
+            # record the covisibility
+            self.viewpoints[cur_frame_idx].covisibile_frame_idx[f_idx] = covisibility.item()
+            self.viewpoints[f_idx].covisibile_frame_idx[cur_frame_idx] = covisibility.item()
+            
+            if covisibility > covisible_thresh:
+                if f_idx not in local_window:
+                    local_window.add(f_idx)
+                    
+                    for f_idx2, covisibility in self.viewpoints[f_idx].covisibile_frame_idx.items():
+                        if covisibility > covisible_thresh and f_idx2 not in visited:
+                            bfs_queue.put(f_idx2)
+
+        return list(local_window)
