@@ -9,6 +9,7 @@ from tqdm import tqdm
 from typing import List, Dict
 from queue import Queue
 import cv2
+import matplotlib.pyplot as plt
 
 from gaussian_splatting.gaussian_renderer import render
 from gaussian_splatting.utils.loss_utils import l1_loss, ssim
@@ -105,7 +106,7 @@ class BRIEFLoopDetector:
 
         self.loop_detector = bow.BRIEFLoopDetector(self.voc, param)
     
-    def addImage(self, image: np.ndarray, image_id: int) -> None:
+    def addImage(self, image: np.ndarray) -> None:
         # switch Axis if necessary
         if image.shape[0] == 3:
             image = np.moveaxis(image, 0, -1)
@@ -122,7 +123,7 @@ class BRIEFLoopDetector:
             result:bow.LoopDetectorResult = result_pkg[0]
             Log("Loop found: query {} match {}".format(result.query, result.match))
         
-        return result_pkg[0]
+        return result_pkg
 
 class BackEnd(mp.Process):
     def __init__(self, config):
@@ -537,8 +538,12 @@ class BackEnd(mp.Process):
                     self.add_next_kf(cur_frame_idx, viewpoint, depth_map=depth_map)
                     
                     # Do Loop Detection
-                    result = self.extractor.addImage(viewpoint.original_image.cpu().numpy(), cur_frame_idx)
+                    result, match_kps, query_kps = self.extractor.addImage(viewpoint.original_image.cpu().numpy())
 
+                    # visualize the loop detection result
+                    if result.status == bow.LoopDetectorDetectionStatus.LOOP_DETECTED:
+                        self.visualize_loop_detection(result, match_kps, query_kps, cur_frame_idx)
+                        
                     opt_params = []
                     frames_to_optimize = self.config["Training"]["pose_window"]
                     iter_per_kf = self.mapping_itr_num if self.single_thread else 10
@@ -620,6 +625,39 @@ class BackEnd(mp.Process):
             self.extractor = BRIEFLoopDetector()
         else:
             raise NotImplementedError("Method not implemented")
+        
+    def visualize_loop_detection(self, result:bow.DetectionResult, match_kps:List[bow.KeyPoint], 
+                                 query_kps:List[bow.KeyPoint], cur_frame_idx:int):
+        """ Visualize the loop detection result """
+        keyframe_idx = list(self.viewpoints.keys())
+        keyframe_idx.sort()
+
+        query_idx = keyframe_idx[result.query]
+        match_idx = keyframe_idx[result.match]
+
+        query_img = self.viewpoints[query_idx].original_image.permute(1, 2, 0).cpu().numpy()
+        match_img = self.viewpoints[match_idx].original_image.permute(1, 2, 0).cpu().numpy()
+
+        # visualize the loop detection result
+        fig, axes = plt.subplots(1, 2, figsize=(10, 10))
+        axes[0].imshow(query_img)
+        axes[0].set_title(f"Query Image {query_idx}")
+        axes[1].imshow(match_img)
+        axes[1].set_title(f"Match Image {match_idx}")
+        fig.savefig(f"loop_detection_{cur_frame_idx}.png")
+
+        H, W = query_img.shape[:2]
+        canvas = np.concatenate([query_img, match_img], axis=1)
+        canvas = np.clip(canvas * 255, 0, 255).astype(np.uint8)
+        for query_kp, match_kp in zip(query_kps, match_kps):
+            # generate random color
+            random_color = (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
+
+            canvas = cv2.circle(canvas, (int(query_kp.pt.x), int(query_kp.pt.y)), 5, random_color, 1)
+            canvas = cv2.circle(canvas, (int(match_kp.pt.x) + W, int(match_kp.pt.y)), 5, random_color, 1)
+            canvas = cv2.line(canvas, (int(query_kp.pt.x), int(query_kp.pt.y)), (int(match_kp.pt.x) + W, int(match_kp.pt.y)), random_color, 2)
+
+        cv2.imwrite(f"loop_detection_{cur_frame_idx}_match.png", canvas)
 
     def pose_graph_optimization(self, local_graph=False):
         # optimize for the pose graph
