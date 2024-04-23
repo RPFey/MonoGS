@@ -227,6 +227,9 @@ class FrontEnd(mp.Process):
     def add_to_window(
         self, cur_frame_idx, cur_frame_visibility_filter, occ_aware_visibility, window
     ):
+        print("\n Adding to window")
+        print("Window length:", len(window))
+        print(self.cameras[cur_frame_idx])
         N_dont_touch = 2
         window = [cur_frame_idx] + window
         # remove frames which has little overlap with the current frame
