@@ -526,6 +526,9 @@ class BackEnd(mp.Process):
                     )
                     self.initialize_map(cur_frame_idx, viewpoint)
                     self.push_to_frontend("init")
+                    
+                    # add image
+                    self.extractor.addImage(viewpoint.original_image.cpu().numpy())
 
                 elif data[0] == "keyframe":
                     cur_frame_idx = data[1]

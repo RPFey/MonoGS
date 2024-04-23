@@ -61,6 +61,23 @@ Our test setup were:
 - Ubuntu 20.04: `pytorch==1.12.1 torchvision==0.13.1 torchaudio==0.12.1 cudatoolkit=11.6`
 - Ubuntu 18.04: `pytorch==1.12.1 torchvision==0.13.1 torchaudio==0.12.1 cudatoolkit=11.3`
 
+## Loop Closure Setup
+
+We use the loop closure in BAD-SLAM.
+
+To prepare the vocabulary for BRIEF descriptor, download [resource files](https://drive.google.com/file/d/1MpZwPjXDAUxKfSTpeCjG0PAUpaeWuo7D) and unzip it under the worksapce forlder. 
+
+The two relevant files from this archive, `brief_k10L6.voc` and `brief_pattern.yml`, must be extracted into a directory named "resources" in the application executable's directory (or an analogous symlink must be created), for example:
+
+```
+- MonoGS
+  - resources
+    - brief_k10L6.voc (notice that this is compressed in the archive and needs to be extracted separately)
+    - brief_pattern.yml
+  slam.py
+  ...
+```
+
 ## Quick Demo
 ```
 bash scripts/download_tum.sh
@@ -84,8 +101,6 @@ bash scripts/download_replica.sh
 ```bash
 bash scripts/download_euroc.sh
 ```
-
-
 
 ## Run
 ### Monocular
@@ -141,42 +156,4 @@ This flag will automatically run our system in a headless mode, and log the resu
 # Reproducibility
 There might be minor differences between the released version and the results in the paper. Please bear in mind that multi-process performance has some randomness due to GPU utilisation.
 We run all our experiments on an RTX 4090, and the performance may differ when running with a different GPU.
-
-# Acknowledgement
-This work incorporates many open-source codes. We extend our gratitude to the authors of the software.
-- [3D Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting)
-- [Differential Gaussian Rasterization
-](https://github.com/graphdeco-inria/diff-gaussian-rasterization)
-- [SIBR_viewers](https://gitlab.inria.fr/sibr/sibr_core)
-- [Tiny Gaussian Splatting Viewer](https://github.com/limacv/GaussianSplattingViewer)
-- [Open3D](https://github.com/isl-org/Open3D)
-- [Point-SLAM](https://github.com/eriksandstroem/Point-SLAM)
-
-# License
-MonoGS is released under a **LICENSE.md**. For a list of code dependencies which are not property of the authors of MonoGS, please check **Dependencies.md**.
-
-# Citation
-If you found this code/work to be useful in your own research, please considering citing the following:
-
-```bibtex
-@inproceedings{Matsuki:Murai:etal:CVPR2024,
-  title={{G}aussian {S}platting {SLAM}},
-  author={Hidenobu Matsuki and Riku Murai and Paul H. J. Kelly and Andrew J. Davison},
-  booktitle={Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition},
-  year={2024}
-}
-
-```
-
-
-
-
-
-
-
-
-
-
-
-
 
