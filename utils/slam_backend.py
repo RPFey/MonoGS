@@ -2,10 +2,13 @@ import random
 import time
 
 import torch
+from torch import Tensor
+import numpy as np
 import torch.multiprocessing as mp
 from tqdm import tqdm
 from typing import List, Dict
 from queue import Queue
+import cv2
 
 from gaussian_splatting.gaussian_renderer import render
 from gaussian_splatting.utils.loss_utils import l1_loss, ssim
@@ -15,6 +18,111 @@ from utils.pose_utils import update_pose
 from utils.slam_utils import get_loss_mapping
 from utils.camera_utils import Camera
 
+import PyDBoW2 as bow
+
+from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
+from torchmetrics.functional.image.lpips import _NoTrainLpips, _LPIPS
+
+def _normalize_tensor(in_feat: Tensor, eps: float = 1e-8):
+    """Normalize input tensor."""
+    norm_factor = torch.sqrt(eps + torch.sum(in_feat**2, dim=1, keepdim=True))
+    return in_feat / norm_factor
+
+
+def _resize_tensor(x: Tensor, size: int = 64):
+    if x.shape[-1] > size and x.shape[-2] > size:
+        return torch.nn.functional.interpolate(x, (size, size), mode="area")
+    return torch.nn.functional.interpolate(x, (size, size), mode="bilinear", align_corners=False)
+
+class LPIPExtractor(_LPIPS):
+    def extract(self, in0, normalize=False):
+        if normalize:  # turn on this flag if input is [0,1] so it can be adjusted to [-1, +1]
+            in0 = 2 * in0 - 1
+
+        # normalize input
+        in0_input = self.scaling_layer(in0)
+
+        # resize input if needed
+        if self.resize is not None:
+            in0_input = _resize_tensor(in0_input, size=self.resize)
+
+        outs0 = self.net.forward(in0_input)
+        feats0 = {}
+
+        for kk in range(self.L):
+            feats0[kk] = _normalize_tensor(outs0[kk])
+
+        return feats0
+
+    def train(self, mode: bool) -> "LPIPExtractor":  # type: ignore[override]
+        """Force network to always be in evaluation mode."""
+        return super().train(False)
+
+class ORBLoopDetector:
+    def __init__(self) -> None:
+        self.extractor = bow.ORBextractor(1000, 1.2, 8, 20, 7) 
+        self.voc = bow.OrbVocabulary()
+        self.voc.loadFromTextFile("/home/wen/Projects/ORB_SLAM2/Vocabulary/ORBvoc.txt")
+
+        param = bow.LoopDetectorParam(480, 640, 0.5, True, 0.15, 1, bow.LoopDetectorGeometricalCheck.GEOM_FLANN, 6)
+        param.max_neighbor_ratio = 0.8
+
+        self.loop_detector = bow.OrbLoopDetector(self.voc, param)
+    
+    def addImage(self, image: np.ndarray, image_id: int) -> None:
+        # switch Axis if necessary
+        if image.shape[0] == 3:
+            image = np.moveaxis(image, 0, -1)
+            image = np.ascontiguousarray(image)
+        
+        image = np.clip(image, a_min=0., a_max=1.)
+        image = (image * 255).astype(np.uint8)
+
+        image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+        mask = np.ones((image.shape[0], image.shape[1]), dtype=np.uint8)
+        
+        kp, des = self.extractor.extract(image, mask)
+        des = np.array(des)
+
+        result_pkg = self.loop_detector.detectLoop(kp, des, image_id)
+        print("Result: ", result_pkg[0].status)
+
+        if result_pkg[0].status == bow.LoopDetectorDetectionStatus.LOOP_DETECTED:
+            result:bow.LoopDetectorResult = result_pkg[0]
+            Log("Loop found: query {} match {}".format(result.query, result.match))
+        
+        return result_pkg[0]
+
+class BRIEFLoopDetector:
+    def __init__(self) -> None:
+        self.extractor = bow.BRIEFextractor("/home/wen/Projects/MonoGS/resources/brief_pattern.yml") 
+        self.voc = bow.BRIEFVocabulary("/home/wen/Projects/MonoGS/resources/brief_k10L6.voc")
+
+        param = bow.BRIEFLoopDetectorParam(480, 640, .5, True, 0.15, 1, bow.LoopDetectorGeometricalCheck.GEOM_EXHAUSTIVE, 2)
+        param.max_neighbor_ratio = 0.8
+        param.max_distance_between_groups = 3
+        param.max_distance_between_queries = 2
+
+        self.loop_detector = bow.BRIEFLoopDetector(self.voc, param)
+    
+    def addImage(self, image: np.ndarray, image_id: int) -> None:
+        # switch Axis if necessary
+        if image.shape[0] == 3:
+            image = np.moveaxis(image, 0, -1)
+            image = np.ascontiguousarray(image)
+        
+        image = np.clip(image, a_min=0., a_max=1.)
+        image = (image * 255).astype(np.uint8)
+        image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+        
+        result_pkg = self.loop_detector.detectLoop(self.extractor, image)
+        print("Result: ", result_pkg[0].status)
+
+        if result_pkg[0].status == bow.LoopDetectorDetectionStatus.LOOP_DETECTED:
+            result:bow.LoopDetectorResult = result_pkg[0]
+            Log("Loop found: query {} match {}".format(result.query, result.match))
+        
+        return result_pkg[0]
 
 class BackEnd(mp.Process):
     def __init__(self, config):
@@ -61,12 +169,14 @@ class BackEnd(mp.Process):
         self.gaussian_reset = self.config["Training"]["gaussian_reset"]
         self.size_threshold = self.config["Training"]["size_threshold"]
         self.window_size = self.config["Training"]["window_size"]
+        self.covisibility_score = self.config["Training"]["covi_score"]
         self.single_thread = (
             self.config["Dataset"]["single_thread"]
             if "single_thread" in self.config["Dataset"]
             else False
         )
         self.covisible_method = "n_touch"
+        self.loop_detection_method = "BoW"
 
     def add_next_kf(self, frame_idx, viewpoint, init=False, scale=2.0, depth_map=None):
         self.gaussians.extend_from_pcd_seq(
@@ -201,34 +311,35 @@ class BackEnd(mp.Process):
                 radii_acm.append(radii)
                 n_touched_acm.append(n_touched)
 
-            for cam_idx in torch.randperm(len(random_viewpoint_stack))[:2]:
-                viewpoint = random_viewpoint_stack[cam_idx]
-                render_pkg = render(
-                    viewpoint, self.gaussians, self.pipeline_params, self.background
-                )
-                (
-                    image,
-                    viewspace_point_tensor,
-                    visibility_filter,
-                    radii,
-                    depth,
-                    opacity,
-                    n_touched,
-                ) = (
-                    render_pkg["render"],
-                    render_pkg["viewspace_points"],
-                    render_pkg["visibility_filter"],
-                    render_pkg["radii"],
-                    render_pkg["depth"],
-                    render_pkg["opacity"],
-                    render_pkg["n_touched"],
-                )
-                loss_mapping += get_loss_mapping(
-                    self.config, image, depth, viewpoint, opacity
-                )
-                viewspace_point_tensor_acm.append(viewspace_point_tensor)
-                visibility_filter_acm.append(visibility_filter)
-                radii_acm.append(radii)
+            # No random point
+            # for cam_idx in torch.randperm(len(random_viewpoint_stack))[:2]:
+            #     viewpoint = random_viewpoint_stack[cam_idx]
+            #     render_pkg = render(
+            #         viewpoint, self.gaussians, self.pipeline_params, self.background
+            #     )
+            #     (
+            #         image,
+            #         viewspace_point_tensor,
+            #         visibility_filter,
+            #         radii,
+            #         depth,
+            #         opacity,
+            #         n_touched,
+            #     ) = (
+            #         render_pkg["render"],
+            #         render_pkg["viewspace_points"],
+            #         render_pkg["visibility_filter"],
+            #         render_pkg["radii"],
+            #         render_pkg["depth"],
+            #         render_pkg["opacity"],
+            #         render_pkg["n_touched"],
+            #     )
+            #     loss_mapping += get_loss_mapping(
+            #         self.config, image, depth, viewpoint, opacity
+            #     )
+            #     viewspace_point_tensor_acm.append(viewspace_point_tensor)
+            #     visibility_filter_acm.append(visibility_filter)
+            #     radii_acm.append(radii)
 
             scaling = self.gaussians.get_scaling
             isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
@@ -319,6 +430,7 @@ class BackEnd(mp.Process):
                     if viewpoint.uid == 0:
                         continue
                     update_pose(viewpoint)
+        
         return gaussian_split
 
     def color_refinement(self):
@@ -369,6 +481,9 @@ class BackEnd(mp.Process):
         self.frontend_queue.put(msg)
 
     def run(self):
+        # init image descriptor extractor
+        self.init_loop_detection_desc()
+            
         while True:
             if self.backend_queue.empty():
                 if self.pause:
@@ -420,6 +535,9 @@ class BackEnd(mp.Process):
                     self.viewpoints[cur_frame_idx] = viewpoint
                     self.current_window = current_window
                     self.add_next_kf(cur_frame_idx, viewpoint, depth_map=depth_map)
+                    
+                    # Do Loop Detection
+                    result = self.extractor.addImage(viewpoint.original_image.cpu().numpy(), cur_frame_idx)
 
                     opt_params = []
                     frames_to_optimize = self.config["Training"]["pose_window"]
@@ -437,8 +555,8 @@ class BackEnd(mp.Process):
                         else:
                             iter_per_kf = self.mapping_itr_num
 
-                    local_window = self.construct_local_graph(cur_frame_idx, 0.5)
-                    print(" Local Map Window: ", local_window)
+                    local_window = self.construct_local_graph(cur_frame_idx, 0.2)
+                    Log(" Local Map Window: ", local_window)
 
                     # extract frames in current window
                     for cam_num, cam_idx in enumerate(local_window):
@@ -450,7 +568,7 @@ class BackEnd(mp.Process):
                                 {
                                     "params": [viewpoint.cam_rot_delta],
                                     "lr": self.config["Training"]["lr"]["cam_rot_delta"]
-                                    * 0.5,
+                                    * 0.5 if cur_frame_idx - cam_idx < 50 else 1e-4,
                                     "name": "rot_{}".format(viewpoint.uid),
                                 }
                             )
@@ -460,21 +578,21 @@ class BackEnd(mp.Process):
                                     "lr": self.config["Training"]["lr"][
                                         "cam_trans_delta"
                                     ]
-                                    * 0.5,
+                                    * 0.5 if cur_frame_idx - cam_idx < 50 else 1e-4,
                                     "name": "trans_{}".format(viewpoint.uid),
                                 }
                             )
                         opt_params.append(
                             {
                                 "params": [viewpoint.exposure_a],
-                                "lr": 0.01,
+                                "lr": 0.01 if cur_frame_idx - cam_idx < 50 else 1e-3,
                                 "name": "exposure_a_{}".format(viewpoint.uid),
                             }
                         )
                         opt_params.append(
                             {
                                 "params": [viewpoint.exposure_b],
-                                "lr": 0.01,
+                                "lr": 0.01 if cur_frame_idx - cam_idx < 50 else 1e-3,
                                 "name": "exposure_b_{}".format(viewpoint.uid),
                             }
                         )
@@ -490,6 +608,18 @@ class BackEnd(mp.Process):
         while not self.frontend_queue.empty():
             self.frontend_queue.get()
         return
+
+    def init_loop_detection_desc(self):
+        if self.loop_detection_method == "lpips":
+            # lpips extractor
+            self.extractor = LPIPExtractor(net="alex")
+            self.extractor.to(self.device)
+
+        elif self.loop_detection_method == "BoW":
+            # Bag of Words extractor
+            self.extractor = BRIEFLoopDetector()
+        else:
+            raise NotImplementedError("Method not implemented")
 
     def pose_graph_optimization(self, local_graph=False):
         # optimize for the pose graph
@@ -554,6 +684,9 @@ class BackEnd(mp.Process):
         local_window = set()
         local_window.add(cur_frame_idx)
 
+        frame_idx = []
+        score = []
+
         # store visited nodes
         visited = set()
         visited.add(cur_frame_idx)
@@ -574,9 +707,36 @@ class BackEnd(mp.Process):
             if covisibility > covisible_thresh:
                 if f_idx not in local_window:
                     local_window.add(f_idx)
+
+                    frame_idx.append(f_idx)
+                    score.append(covisibility.item())
                     
                     for f_idx2, covisibility in self.viewpoints[f_idx].covisibile_frame_idx.items():
                         if covisibility > covisible_thresh and f_idx2 not in visited:
                             bfs_queue.put(f_idx2)
 
-        return list(local_window)
+        frame_idx = np.array(frame_idx)
+        score = np.array(score)
+
+         # sort the frames based on the covisibility score
+        sorted_idx = np.argsort(score)[::-1]
+        frame_idx = frame_idx[sorted_idx][:self.window_size]
+        local_window = [cur_frame_idx] + frame_idx.tolist()
+
+        frame_diff = cur_frame_idx - frame_idx
+        loop_frame = frame_idx[frame_diff > 50]
+        if len(loop_frame) > 0:
+            Log("Loop detected: ", loop_frame)
+            for l_frame in loop_frame:
+                covisibility = [[f_idx, score] for f_idx, score in self.viewpoints[l_frame].covisibile_frame_idx.items()]
+                covisibility.sort(key=lambda x: x[1], reverse=True)
+                
+                neighbor = 0
+                for f_idx, score in covisibility:
+                    if f_idx not in local_window:
+                        local_window.append(f_idx)
+                        neighbor += 1
+                        if neighbor >= 1:
+                            break
+       
+        return local_window
