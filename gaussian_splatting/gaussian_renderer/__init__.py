@@ -127,7 +127,7 @@ def render(
             rho=viewpoint_camera.cam_trans_delta,
         )
     else:
-        rendered_image, radii, depth, opacity, n_touched = rasterizer(
+        rendered_image, radii, depth, opacity, n_touched, max_weight_mask, first_touched = rasterizer(
             means3D=means3D,
             means2D=means2D,
             shs=shs,
@@ -150,4 +150,6 @@ def render(
         "depth": depth,
         "opacity": opacity,
         "n_touched": n_touched,
+        "max_weight_mask": max_weight_mask,
+        "first_touched": first_touched
     }
