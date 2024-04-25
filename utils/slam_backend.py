@@ -6,17 +6,18 @@ from torch import Tensor
 import numpy as np
 import torch.multiprocessing as mp
 from tqdm import tqdm
-from typing import List, Dict
+from typing import List, Dict, Tuple
 from queue import Queue
 import cv2
 import matplotlib.pyplot as plt
+from lietorch import SO3, SE3
 
 from gaussian_splatting.gaussian_renderer import render
 from gaussian_splatting.utils.loss_utils import l1_loss, ssim
 from utils.logging_utils import Log
 from utils.multiprocessing_utils import clone_obj
-from utils.pose_utils import update_pose
-from utils.slam_utils import get_loss_mapping
+from utils.pose_utils import update_pose, batch_rotation_matrix_to_quaternion, quaternion_to_rotation_matrix
+from utils.slam_utils import get_loss_mapping, get_loss_tracking, get_median_depth
 from utils.camera_utils import Camera
 
 import PyDBoW2 as bow
@@ -100,7 +101,7 @@ class BRIEFLoopDetector:
         self.voc = bow.BRIEFVocabulary("/home/wen/Projects/MonoGS/resources/brief_k10L6.voc")
 
         param = bow.BRIEFLoopDetectorParam(480, 640, .5, True, 0.15, 1, bow.LoopDetectorGeometricalCheck.GEOM_EXHAUSTIVE, 2)
-        param.max_neighbor_ratio = 0.8
+        param.max_neighbor_ratio = 0.6
         param.max_distance_between_groups = 3
         param.max_distance_between_queries = 2
 
@@ -124,6 +125,25 @@ class BRIEFLoopDetector:
             Log("Loop found: query {} match {}".format(result.query, result.match))
         
         return result_pkg
+    
+def SolveProcrustes(A:np.ndarray, B:np.ndarray):
+    """ Solve the Procrustes problem 
+
+    Args:
+        A (np.ndarray): (3, N) Camera points
+        B (np.ndarray): (3, N) World points
+    """
+    A_center = A - A.mean(axis=1, keepdims=True)
+    B_center = B - B.mean(axis=1, keepdims=True)
+
+    Sigma = B_center @ A_center.T
+    U, _, Vt = np.linalg.svd(Sigma)
+    diag = np.diag([1, 1, np.linalg.det(U @ Vt)])
+
+    R = Vt.T @ diag @ U.T
+    T = A.mean(axis=1) - R @ B.mean(axis=1)
+
+    return R, T
 
 class BackEnd(mp.Process):
     def __init__(self, config):
@@ -254,99 +274,70 @@ class BackEnd(mp.Process):
         Log("Initialized map")
         return render_pkg
 
-    def map(self, current_window, prune=False, iters=1):
+    def map(self, current_window, prune=False, iters=1, optimize_pose=True):
         if len(current_window) == 0:
             return
 
         viewpoint_stack = [self.viewpoints[kf_idx] for kf_idx in current_window]
-        random_viewpoint_stack = []
-        frames_to_optimize = self.config["Training"]["pose_window"]
 
-        current_window_set = set(current_window)
-        for cam_idx, viewpoint in self.viewpoints.items():
-            if cam_idx in current_window_set:
-                continue
-            random_viewpoint_stack.append(viewpoint)
+        frames_per_batch = 5
+        num_batches = len(current_window) // frames_per_batch + 1
 
         for _ in range(iters):
             self.iteration_count += 1
             self.last_sent += 1
 
-            loss_mapping = 0
             viewspace_point_tensor_acm = []
             visibility_filter_acm = []
             radii_acm = []
             n_touched_acm = []
 
-            keyframes_opt = []
+            for batch_idx in range(num_batches):
+                # get batch in order
+                start = batch_idx * frames_per_batch
+                end = min((batch_idx + 1) * frames_per_batch, len(current_window))
+                if start >= end:
+                    break
+                batch_list = list(range(start, end))
 
-            for cam_idx in range(len(current_window)):
-                viewpoint = viewpoint_stack[cam_idx]
-                keyframes_opt.append(viewpoint)
-                render_pkg = render(
-                    viewpoint, self.gaussians, self.pipeline_params, self.background
-                )
-                (
-                    image,
-                    viewspace_point_tensor,
-                    visibility_filter,
-                    radii,
-                    depth,
-                    opacity,
-                    n_touched,
-                ) = (
-                    render_pkg["render"],
-                    render_pkg["viewspace_points"],
-                    render_pkg["visibility_filter"],
-                    render_pkg["radii"],
-                    render_pkg["depth"],
-                    render_pkg["opacity"],
-                    render_pkg["n_touched"],
-                )
+                loss_mapping = 0                
+                for cam_idx in batch_list:
+                    viewpoint = viewpoint_stack[cam_idx]
+                    render_pkg = render(
+                        viewpoint, self.gaussians, self.pipeline_params, self.background
+                    )
+                    (
+                        image,
+                        viewspace_point_tensor,
+                        visibility_filter,
+                        radii,
+                        depth,
+                        opacity,
+                        n_touched,
+                    ) = (
+                        render_pkg["render"],
+                        render_pkg["viewspace_points"],
+                        render_pkg["visibility_filter"],
+                        render_pkg["radii"],
+                        render_pkg["depth"],
+                        render_pkg["opacity"],
+                        render_pkg["n_touched"],
+                    )
 
-                loss_mapping += get_loss_mapping(
-                    self.config, image, depth, viewpoint, opacity
-                )
-                viewspace_point_tensor_acm.append(viewspace_point_tensor)
-                visibility_filter_acm.append(visibility_filter)
-                radii_acm.append(radii)
-                n_touched_acm.append(n_touched)
+                    loss_mapping += get_loss_mapping(
+                        self.config, image, depth, viewpoint, opacity
+                    )
+                    viewspace_point_tensor_acm.append(viewspace_point_tensor)
+                    visibility_filter_acm.append(visibility_filter)
+                    radii_acm.append(radii)
+                    n_touched_acm.append(n_touched)
 
-            # No random point
-            # for cam_idx in torch.randperm(len(random_viewpoint_stack))[:2]:
-            #     viewpoint = random_viewpoint_stack[cam_idx]
-            #     render_pkg = render(
-            #         viewpoint, self.gaussians, self.pipeline_params, self.background
-            #     )
-            #     (
-            #         image,
-            #         viewspace_point_tensor,
-            #         visibility_filter,
-            #         radii,
-            #         depth,
-            #         opacity,
-            #         n_touched,
-            #     ) = (
-            #         render_pkg["render"],
-            #         render_pkg["viewspace_points"],
-            #         render_pkg["visibility_filter"],
-            #         render_pkg["radii"],
-            #         render_pkg["depth"],
-            #         render_pkg["opacity"],
-            #         render_pkg["n_touched"],
-            #     )
-            #     loss_mapping += get_loss_mapping(
-            #         self.config, image, depth, viewpoint, opacity
-            #     )
-            #     viewspace_point_tensor_acm.append(viewspace_point_tensor)
-            #     visibility_filter_acm.append(visibility_filter)
-            #     radii_acm.append(radii)
+                scaling = self.gaussians.get_scaling
+                isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
+                loss_mapping += 2 * (end - start) * isotropic_loss.mean()
+                loss_mapping.backward()
 
-            scaling = self.gaussians.get_scaling
-            isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
-            loss_mapping += 10 * isotropic_loss.mean()
-            loss_mapping.backward()
-            gaussian_split = False
+            gaussian_split = False    
             ## Deinsifying / Pruning Gaussians
             with torch.no_grad():
                 self.occ_aware_visibility = {}
@@ -423,14 +414,22 @@ class BackEnd(mp.Process):
                 self.gaussians.optimizer.step()
                 self.gaussians.optimizer.zero_grad(set_to_none=True)
                 self.gaussians.update_learning_rate(self.iteration_count)
-                self.keyframe_optimizers.step()
+
+                if optimize_pose:
+                    self.keyframe_optimizers.step()
+                    # Pose update
+                    for cam_idx in range(len(current_window)):
+                        viewpoint = viewpoint_stack[cam_idx]
+                        if viewpoint.uid == 0:
+                            continue
+                        update_pose(viewpoint)
+                else:
+                    for cam_idx in range(len(current_window)):
+                        viewpoint = viewpoint_stack[cam_idx]
+                        viewpoint.cam_rot_delta.data.fill_(0)
+                        viewpoint.cam_trans_delta.data.fill_(0)
+
                 self.keyframe_optimizers.zero_grad(set_to_none=True)
-                # Pose update
-                for cam_idx in range(min(frames_to_optimize, len(current_window))):
-                    viewpoint = viewpoint_stack[cam_idx]
-                    if viewpoint.uid == 0:
-                        continue
-                    update_pose(viewpoint)
         
         return gaussian_split
 
@@ -546,6 +545,9 @@ class BackEnd(mp.Process):
                     # visualize the loop detection result
                     if result.status == bow.LoopDetectorDetectionStatus.LOOP_DETECTED:
                         self.visualize_loop_detection(result, match_kps, query_kps, cur_frame_idx)
+
+                        # correct loop
+                        self.close_loop(result, match_kps, query_kps)
                         
                     opt_params = []
                     frames_to_optimize = self.config["Training"]["pose_window"]
@@ -563,7 +565,16 @@ class BackEnd(mp.Process):
                         else:
                             iter_per_kf = self.mapping_itr_num
 
-                    local_window = self.construct_local_graph(cur_frame_idx, 0.2)
+                    if result.status == bow.LoopDetectorDetectionStatus.LOOP_DETECTED:
+                        keyframe_idx = list(self.viewpoints.keys())
+                        keyframe_idx.sort()
+                        query_idx = keyframe_idx[result.query]
+                        match_idx = keyframe_idx[result.match]
+                        # local window is between the loop
+                        local_window = [idx for idx in keyframe_idx if idx <= query_idx and idx >= match_idx]
+                    else:
+                        local_window = self.construct_local_graph(cur_frame_idx, 0.2)
+                    
                     Log(" Local Map Window: ", local_window)
 
                     # extract frames in current window
@@ -662,13 +673,89 @@ class BackEnd(mp.Process):
 
         cv2.imwrite(f"loop_detection_{cur_frame_idx}_match.png", canvas)
 
-    def pose_graph_optimization(self, local_graph=False):
-        # optimize for the pose graph
-        pass
 
-    def loop_detection(self):
-        """ Detect loops in the new keyframe """
-        pass
+    def close_loop(self, result:bow.DetectionResult, match_kps:List[bow.KeyPoint], 
+                         query_kps:List[bow.KeyPoint]):
+        """ Close the loop """
+        keyframe_idx = list(self.viewpoints.keys())
+        keyframe_idx.sort()
+
+        query_idx = keyframe_idx[result.query]
+        match_idx = keyframe_idx[result.match]
+
+        # intrinsic matrix here
+        K = np.array([
+            [self.viewpoints[match_idx].fx, 0, self.viewpoints[match_idx].cx],
+            [0, self.viewpoints[match_idx].fy, self.viewpoints[match_idx].cy],
+            [0, 0, 1.]])
+
+        def unproject_kps(kps:List[bow.KeyPoint], depth:np.ndarray):
+            """ Unproject the keypoints """
+            unprojected = []
+            for kp in kps:
+                img_point = np.array([kp.pt.x, kp.pt.y, 1.0])
+                point3D = depth[int(kp.pt.y), int(kp.pt.x)] * np.linalg.inv(K).dot(img_point)
+                unprojected.append(point3D)
+            return np.array(unprojected)
+
+        query_pts = np.array([ [kp.pt.x, kp.pt.y] for kp in query_kps])
+        match_pts = np.array([ [kp.pt.x, kp.pt.y] for kp in match_kps])
+
+        distCoeff = np.array([0.262383, -0.953104, -0.005358, 0.002628, 1.163314])
+        # p_query = R_m2q * p_match + T_m2q
+        _, E, R_m2q, T_m2q, mask = cv2.recoverPose(match_pts, query_pts, K, distCoeff, K, distCoeff)
+
+        # estimate scale here
+        valid_query_points = query_pts[mask.ravel() == 1]
+        valid_match_points = match_pts[mask.ravel() == 1]
+
+        undistorted_match_points = cv2.undistortPoints(valid_match_points, K, distCoeff)
+        undistorted_match_points = undistorted_match_points[:, 0, :]
+        undistorted_match_points = np.concatenate([undistorted_match_points, np.ones((undistorted_match_points.shape[0], 1))], axis=1)
+        undistorted_query_points = cv2.undistortPoints(valid_query_points, K, distCoeff)
+        undistorted_query_points = undistorted_query_points[:, 0, :]
+        undistorted_query_points = np.concatenate([undistorted_query_points, np.ones((undistorted_query_points.shape[0], 1))], axis=1)
+
+        match_scale = []
+        for match_pixel, undistorted_match, undistorted_query in zip(valid_match_points, undistorted_match_points, undistorted_query_points):
+            A = np.array([undistorted_query, - R_m2q @ undistorted_match]).T
+            scale = np.linalg.pinv(A) @ T_m2q
+            depth = self.viewpoints[match_idx].depth[int(match_pixel[1]), int(match_pixel[0])]
+            if depth > 0:   
+                match_scale.append(depth / scale[1])
+
+        print(match_scale)
+        print("Scale: ", np.median(match_scale))
+
+        T_m2q = T_m2q * np.median(match_scale)
+        
+        R_m2q, T_m2q = torch.from_numpy(R_m2q).float().to(self.device), torch.from_numpy(T_m2q).float().to(self.device)
+        T_m2q = T_m2q.flatten()
+        R, T = R_m2q @ self.viewpoints[match_idx].R, R_m2q @ self.viewpoints[match_idx].T + T_m2q
+
+        # Calculate loop error
+        loop_trans_error = torch.linalg.norm(T - self.viewpoints[query_idx].T)
+        loop_rot_error = torch.arccos((torch.trace(R.T @ self.viewpoints[query_idx].R) - 1) / 2) * 180 / np.pi
+        Log("Loop Translation Error {} Rotation Error {}".format(loop_trans_error, loop_rot_error))
+
+        cam_idx_in_loop = [idx for idx in self.viewpoints.keys() if idx <= query_idx and idx >= match_idx]
+        cam_idx_in_loop.sort()
+
+        # finetune the optimized pose (maybe ICP would be better)
+        # self.viewpoints[query_idx].update_RT(R, T)
+        # self.finetune_pose(self.viewpoints[query_idx])
+        # R, T = self.viewpoints[query_idx].R, self.viewpoints[query_idx].T
+        # loop_R = self.viewpoints[query_idx].R @ self.viewpoints[match_idx].R.T 
+        # loop_T = self.viewpoints[match_idx].R @ self.viewpoints[match_idx].T - loop_R @ self.viewpoints[query_idx].T 
+        
+        loop_R, loop_T = R_m2q, T_m2q
+        self.pose_graph_optimization(cam_idx_in_loop, (loop_R, loop_T))
+
+        # reset opacity if needed
+        self.gaussians.reset_opacity()
+
+        # remap here
+        self.map(keyframe_idx, optimize_pose=False)
 
     def ntouch_covisibility(self, f_idx1, f_idx2):
         # compute the covisibility score between two frames
@@ -781,3 +868,135 @@ class BackEnd(mp.Process):
                             break
        
         return local_window
+
+    def pose_graph_optimization(self, cam_idx_in_loop:List[int], 
+                                loop_result:Tuple[torch.Tensor], pose_iterations:int=100):
+        """ Pose graph optimization """
+
+        loop_R, loop_T = loop_result
+        with torch.no_grad():
+            # Pose Graph Optimization to refine the pose
+            cam_translation = torch.stack([self.viewpoints[idx].T for idx in cam_idx_in_loop], dim=0)
+            cam_translation = cam_translation.unsqueeze(2) # (N, 3, 1)
+            cam_rotation = torch.stack([self.viewpoints[idx].R for idx in cam_idx_in_loop], dim=0) # (N, 3, 3)
+
+            rel_rotation = torch.bmm(cam_rotation[:-1, :, :], cam_rotation[1:, :, :].transpose(1, 2))
+            rel_translation = cam_translation[:-1] - torch.bmm(rel_rotation, cam_translation[1:])
+
+            rel_translation = torch.cat([rel_translation, loop_T.view(1, 3, 1)], dim=0)
+            rel_rotation = torch.cat([rel_rotation, loop_R.view(1, 3, 3)], dim=0)
+            rel_quat = batch_rotation_matrix_to_quaternion(rel_rotation)
+
+            measurements = torch.cat([rel_translation.squeeze(2), rel_quat], dim=1) # (N, 3, 7)
+            gt_rel_pose = SE3.InitFromVec(measurements)
+
+            # Pose Graph Optimization
+            cam_quat = batch_rotation_matrix_to_quaternion(cam_rotation)
+            cam_translation = cam_translation.squeeze(2)   
+
+            # Don't optimize the beginning of the loop 
+            optimizable_cam_quat = cam_quat[1:]
+            optimizable_cam_trans = cam_translation[1:]
+
+        optimizable_cam_quat.requires_grad_(True)
+        optimizable_cam_trans.requires_grad_(True)
+
+        opt_params = [
+            {
+                "params": optimizable_cam_trans,
+                "lr": 2e-3,
+                "name": "cam_translation"
+            },
+            {
+                "params": optimizable_cam_quat,
+                "lr": 4e-3,
+                "name": "cam_quat"
+            }
+        ]
+
+        optimizer = torch.optim.Adam(opt_params)
+
+        for _ in range(pose_iterations):
+            optimizer.zero_grad()
+
+            cam_translation_ = torch.cat([cam_translation[[0]], optimizable_cam_trans], dim=0)
+            cam_quat_ = torch.cat([cam_quat[[0]], optimizable_cam_quat], dim=0)
+
+            parameters = torch.cat([cam_translation_, cam_quat_], dim=1) # (N, 7)
+            poses = SE3.InitFromVec(parameters)
+            N = parameters.shape[0]
+
+            idx0 = list(range(N))
+            idx1 = list(range(1, N)) + [0]
+
+            rel_pose = poses[idx0] * poses[idx1].inv()
+            residual = (gt_rel_pose.inv() * rel_pose).log()
+            loss = residual.norm(dim=1).mean()
+            loss.backward()
+            optimizer.step()
+
+        # Update the camera poses
+        with torch.no_grad():
+            for cam_idx, quat, trans in zip(cam_idx_in_loop[1:], optimizable_cam_quat, optimizable_cam_trans):
+                quat = quat / quat.norm()
+                rot = quaternion_to_rotation_matrix(quat)
+                self.viewpoints[cam_idx].R.copy_(rot)
+                self.viewpoints[cam_idx].T.copy_(trans)               
+
+    def finetune_pose(self, viewpoint, finetune_iters=100):
+        """ Finetune the pose of the camera """
+        opt_params = []
+        opt_params.append(
+            {
+                "params": [viewpoint.cam_rot_delta],
+                "lr": self.config["Training"]["lr"]["cam_rot_delta"],
+                "name": "rot_{}".format(viewpoint.uid),
+            }
+        )
+        opt_params.append(
+            {
+                "params": [viewpoint.cam_trans_delta],
+                "lr": self.config["Training"]["lr"]["cam_trans_delta"],
+                "name": "trans_{}".format(viewpoint.uid),
+            }
+        )
+        opt_params.append(
+            {
+                "params": [viewpoint.exposure_a],
+                "lr": 0.01,
+                "name": "exposure_a_{}".format(viewpoint.uid),
+            }
+        )
+        opt_params.append(
+            {
+                "params": [viewpoint.exposure_b],
+                "lr": 0.01,
+                "name": "exposure_b_{}".format(viewpoint.uid),
+            }
+        )
+
+        pose_optimizer = torch.optim.Adam(opt_params)
+        for tracking_itr in range(finetune_iters):
+            render_pkg = render(
+                viewpoint, self.gaussians, self.pipeline_params, self.background
+            )
+            image, depth, opacity = (
+                render_pkg["render"],
+                render_pkg["depth"],
+                render_pkg["opacity"],
+            )
+            pose_optimizer.zero_grad()
+            loss_tracking = get_loss_tracking(
+                self.config, image, depth, opacity, viewpoint
+            )
+            loss_tracking.backward()
+
+            with torch.no_grad():
+                pose_optimizer.step()
+                converged = update_pose(viewpoint)
+
+            if converged:
+                break
+
+        self.median_depth = get_median_depth(depth, opacity)
+        return render_pkg
