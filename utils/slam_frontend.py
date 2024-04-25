@@ -31,7 +31,9 @@ class FrontEnd(mp.Process):
         self.monocular = config["Training"]["monocular"]
         self.iteration_count = 0
         self.occ_aware_visibility = {}
+        self.max_weight_visibility = {}
         self.current_window = []
+        self.all_kf = []
 
         self.reset = True
         self.requested_init = False
@@ -112,6 +114,7 @@ class FrontEnd(mp.Process):
         self.kf_indices = []
         self.iteration_count = 0
         self.occ_aware_visibility = {}
+        self.max_weight_visibility = {}
         self.current_window = []
         # remove everything from the queues
         while not self.backend_queue.empty():
@@ -224,70 +227,95 @@ class FrontEnd(mp.Process):
         point_ratio_2 = intersection / union
         return (point_ratio_2 < kf_overlap and dist_check2) or dist_check
 
-    def add_to_window(
-        self, cur_frame_idx, cur_frame_visibility_filter, occ_aware_visibility, window
-    ):
-        print("\n Adding to window")
-        print("Window length:", len(window))
-        print(self.cameras[cur_frame_idx].T)
-        print(self.cameras[cur_frame_idx].R)
-        N_dont_touch = 2
-        window = [cur_frame_idx] + window
-        # remove frames which has little overlap with the current frame
-        curr_frame = self.cameras[cur_frame_idx]
-        to_remove = []
-        removed_frame = None
-        for i in range(N_dont_touch, len(window)):
-            kf_idx = window[i]
-            # szymkiewicz–simpson coefficient
+    # def add_to_window(
+    #     self, cur_frame_idx, cur_frame_visibility_filter, occ_aware_visibility, window
+    # ):
+    #     print("\n Adding to window")
+    #     print("Window length:", len(window))
+    #     print(self.cameras[cur_frame_idx].T)
+    #     print(self.cameras[cur_frame_idx].R)
+    #     N_dont_touch = 2
+    #     window = [cur_frame_idx] + window
+    #     # remove frames which has little overlap with the current frame
+    #     curr_frame = self.cameras[cur_frame_idx]
+    #     to_remove = []
+    #     removed_frame = None
+    #     for i in range(N_dont_touch, len(window)):
+    #         kf_idx = window[i]
+    #         # szymkiewicz–simpson coefficient
+    #         intersection = torch.logical_and(
+    #             cur_frame_visibility_filter, occ_aware_visibility[kf_idx]
+    #         ).count_nonzero()
+    #         denom = min(
+    #             cur_frame_visibility_filter.count_nonzero(),
+    #             occ_aware_visibility[kf_idx].count_nonzero(),
+    #         )
+    #         point_ratio_2 = intersection / denom
+    #         cut_off = (
+    #             self.config["Training"]["kf_cutoff"]
+    #             if "kf_cutoff" in self.config["Training"]
+    #             else 0.4
+    #         )
+    #         if not self.initialized:
+    #             cut_off = 0.4
+    #         if point_ratio_2 <= cut_off:
+    #             to_remove.append(kf_idx)
+    #
+    #     if to_remove:
+    #         window.remove(to_remove[-1])
+    #         removed_frame = to_remove[-1]
+    #     kf_0_WC = torch.linalg.inv(getWorld2View2(curr_frame.R, curr_frame.T))
+    #
+    #     if len(window) > self.config["Training"]["window_size"]:
+    #         # we need to find the keyframe to remove...
+    #         inv_dist = []
+    #         for i in range(N_dont_touch, len(window)):
+    #             inv_dists = []
+    #             kf_i_idx = window[i]
+    #             kf_i = self.cameras[kf_i_idx]
+    #             kf_i_CW = getWorld2View2(kf_i.R, kf_i.T)
+    #             for j in range(N_dont_touch, len(window)):
+    #                 if i == j:
+    #                     continue
+    #                 kf_j_idx = window[j]
+    #                 kf_j = self.cameras[kf_j_idx]
+    #                 kf_j_WC = torch.linalg.inv(getWorld2View2(kf_j.R, kf_j.T))
+    #                 T_CiCj = kf_i_CW @ kf_j_WC
+    #                 inv_dists.append(1.0 / (torch.norm(T_CiCj[0:3, 3]) + 1e-6).item())
+    #             T_CiC0 = kf_i_CW @ kf_0_WC
+    #             k = torch.sqrt(torch.norm(T_CiC0[0:3, 3])).item()
+    #             inv_dist.append(k * sum(inv_dists))
+    #
+    #         idx = np.argmax(inv_dist)
+    #         removed_frame = window[N_dont_touch + idx]
+    #         window.remove(removed_frame)
+    #
+    #     return window, removed_frame
+
+    def add_to_window(self, cur_frame_idx, cur_weight_visibility, weight_visibility, window, lim=8):
+        # build a new window each time
+
+        print("Adding to Window")
+        self.all_kf.append(cur_frame_idx)
+        new_window = [cur_frame_idx]
+        for i in range(len(self.all_kf)-2, -1, -1):
+            other_idx = self.all_kf[i]
             intersection = torch.logical_and(
-                cur_frame_visibility_filter, occ_aware_visibility[kf_idx]
+                cur_weight_visibility, weight_visibility[other_idx]
             ).count_nonzero()
             denom = min(
-                cur_frame_visibility_filter.count_nonzero(),
-                occ_aware_visibility[kf_idx].count_nonzero(),
+                cur_weight_visibility.count_nonzero(),
+                weight_visibility.count_nonzero()
             )
-            point_ratio_2 = intersection / denom
-            cut_off = (
-                self.config["Training"]["kf_cutoff"]
-                if "kf_cutoff" in self.config["Training"]
-                else 0.4
-            )
-            if not self.initialized:
-                cut_off = 0.4
-            if point_ratio_2 <= cut_off:
-                to_remove.append(kf_idx)
+            point_ratio_2 = intersectoin/denom
+            if point_ratio_2 >= 0.5:
+                new_window.append(other_idx)
+            if len(new_window) == lim:
+                break
 
-        if to_remove:
-            window.remove(to_remove[-1])
-            removed_frame = to_remove[-1]
-        kf_0_WC = torch.linalg.inv(getWorld2View2(curr_frame.R, curr_frame.T))
+        return new_window, None
 
-        if len(window) > self.config["Training"]["window_size"]:
-            # we need to find the keyframe to remove...
-            inv_dist = []
-            for i in range(N_dont_touch, len(window)):
-                inv_dists = []
-                kf_i_idx = window[i]
-                kf_i = self.cameras[kf_i_idx]
-                kf_i_CW = getWorld2View2(kf_i.R, kf_i.T)
-                for j in range(N_dont_touch, len(window)):
-                    if i == j:
-                        continue
-                    kf_j_idx = window[j]
-                    kf_j = self.cameras[kf_j_idx]
-                    kf_j_WC = torch.linalg.inv(getWorld2View2(kf_j.R, kf_j.T))
-                    T_CiCj = kf_i_CW @ kf_j_WC
-                    inv_dists.append(1.0 / (torch.norm(T_CiCj[0:3, 3]) + 1e-6).item())
-                T_CiC0 = kf_i_CW @ kf_0_WC
-                k = torch.sqrt(torch.norm(T_CiC0[0:3, 3])).item()
-                inv_dist.append(k * sum(inv_dists))
 
-            idx = np.argmax(inv_dist)
-            removed_frame = window[N_dont_touch + idx]
-            window.remove(removed_frame)
-
-        return window, removed_frame
 
     def request_keyframe(self, cur_frame_idx, viewpoint, current_window, depthmap):
         msg = ["keyframe", cur_frame_idx, viewpoint, current_window, depthmap]
@@ -307,6 +335,7 @@ class FrontEnd(mp.Process):
         self.gaussians = data[1]
         occ_aware_visibility = data[2]
         keyframes = data[3]
+        self.max_weight_visibility = data[4]
         self.occ_aware_visibility = occ_aware_visibility
 
         for kf_id, kf_R, kf_T in keyframes:
@@ -416,6 +445,7 @@ class FrontEnd(mp.Process):
                 last_keyframe_idx = self.current_window[0]
                 check_time = (cur_frame_idx - last_keyframe_idx) >= self.kf_interval
                 curr_visibility = (render_pkg["n_touched"] > 0).long()
+                max_weight_mask = (render_pkg["max_weight_mask"] >= 5).long()
                 create_kf = self.is_keyframe(
                     cur_frame_idx,
                     last_keyframe_idx,
@@ -439,8 +469,8 @@ class FrontEnd(mp.Process):
                 if create_kf:
                     self.current_window, removed = self.add_to_window(
                         cur_frame_idx,
-                        curr_visibility,
-                        self.occ_aware_visibility,
+                        max_weight_mask,
+                        self.max_weight_visibility,
                         self.current_window,
                     )
                     if self.monocular and not self.initialized and removed is not None:

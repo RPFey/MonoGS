@@ -33,6 +33,7 @@ class BackEnd(mp.Process):
         self.iteration_count = 0
         self.last_sent = 0
         self.occ_aware_visibility = {}
+        self.max_weight_visibiltiy = {}
         self.viewpoints = {}
         self.current_window = []
         self.initialized = not self.monocular
@@ -72,6 +73,7 @@ class BackEnd(mp.Process):
     def reset(self):
         self.iteration_count = 0
         self.occ_aware_visibility = {}
+        self.max_weight_visibiltiy = {}
         self.viewpoints = {}
         self.current_window = []
         self.initialized = not self.monocular
@@ -97,6 +99,7 @@ class BackEnd(mp.Process):
                 depth,
                 opacity,
                 n_touched,
+                max_weight_mask,
             ) = (
                 render_pkg["render"],
                 render_pkg["viewspace_points"],
@@ -105,6 +108,7 @@ class BackEnd(mp.Process):
                 render_pkg["depth"],
                 render_pkg["opacity"],
                 render_pkg["n_touched"],
+                render_pkg["max_weight_mask"],
             )
             loss_init = get_loss_mapping(
                 self.config, image, depth, viewpoint, opacity, initialization=True
@@ -136,6 +140,7 @@ class BackEnd(mp.Process):
                 self.gaussians.optimizer.zero_grad(set_to_none=True)
 
         self.occ_aware_visibility[cur_frame_idx] = (n_touched > 0).long()
+        self.max_weight_visibiltiy[cur_frame_idx] = (max_weight_mask >= 5).long()
         Log("Initialized map")
         return render_pkg
 
@@ -162,6 +167,7 @@ class BackEnd(mp.Process):
             visibility_filter_acm = []
             radii_acm = []
             n_touched_acm = []
+            max_weight_acm = []
 
             keyframes_opt = []
 
@@ -179,6 +185,7 @@ class BackEnd(mp.Process):
                     depth,
                     opacity,
                     n_touched,
+                    max_weight_mask,
                 ) = (
                     render_pkg["render"],
                     render_pkg["viewspace_points"],
@@ -187,6 +194,7 @@ class BackEnd(mp.Process):
                     render_pkg["depth"],
                     render_pkg["opacity"],
                     render_pkg["n_touched"],
+                    render_pkg["max_weight_mask"],
                 )
 
                 loss_mapping += get_loss_mapping(
@@ -196,6 +204,8 @@ class BackEnd(mp.Process):
                 visibility_filter_acm.append(visibility_filter)
                 radii_acm.append(radii)
                 n_touched_acm.append(n_touched)
+                max_weight_acm.append(max_weight_mask)
+
 
             for cam_idx in torch.randperm(len(random_viewpoint_stack))[:2]:
                 viewpoint = random_viewpoint_stack[cam_idx]
@@ -210,6 +220,7 @@ class BackEnd(mp.Process):
                     depth,
                     opacity,
                     n_touched,
+                    max_weight_mask,
                 ) = (
                     render_pkg["render"],
                     render_pkg["viewspace_points"],
@@ -218,6 +229,7 @@ class BackEnd(mp.Process):
                     render_pkg["depth"],
                     render_pkg["opacity"],
                     render_pkg["n_touched"],
+                    render_pkg["max_weight_mask"],
                 )
                 loss_mapping += get_loss_mapping(
                     self.config, image, depth, viewpoint, opacity
@@ -234,10 +246,13 @@ class BackEnd(mp.Process):
             ## Deinsifying / Pruning Gaussians
             with torch.no_grad():
                 self.occ_aware_visibility = {}
+                self.max_weight_visibiltiy = {}
                 for idx in range((len(current_window))):
                     kf_idx = current_window[idx]
                     n_touched = n_touched_acm[idx]
+                    max_weight_mask = max_weight_acm[idx]
                     self.occ_aware_visibility[kf_idx] = (n_touched > 0).long()
+                    self.max_weight_visibility[kf_idx] = (max_weight_mask >= 5).long()
 
                 # # compute the visibility of the gaussians
                 # # Only prune on the last iteration and when we have full window
@@ -267,6 +282,9 @@ class BackEnd(mp.Process):
                                 current_idx = current_window[idx]
                                 self.occ_aware_visibility[current_idx] = (
                                     self.occ_aware_visibility[current_idx][~to_prune]
+                                )
+                                self.max_weight_visibiltiy[current_idx] = (
+                                    self.max_weight_visibiltiy[current_idx][~to_prune]
                                 )
                         if not self.initialized:
                             self.initialized = True
@@ -361,7 +379,7 @@ class BackEnd(mp.Process):
         if tag is None:
             tag = "sync_backend"
 
-        msg = [tag, clone_obj(self.gaussians), self.occ_aware_visibility, keyframes]
+        msg = [tag, clone_obj(self.gaussians), self.occ_aware_visibility, keyframes, self.max_weight_visibiltiy]
         self.frontend_queue.put(msg)
 
     def run(self):
