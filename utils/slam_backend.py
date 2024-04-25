@@ -33,7 +33,7 @@ class BackEnd(mp.Process):
         self.iteration_count = 0
         self.last_sent = 0
         self.occ_aware_visibility = {}
-        self.max_weight_visibiltiy = {}
+        self.max_weight_visibility = {}
         self.viewpoints = {}
         self.current_window = []
         self.initialized = not self.monocular
@@ -73,7 +73,7 @@ class BackEnd(mp.Process):
     def reset(self):
         self.iteration_count = 0
         self.occ_aware_visibility = {}
-        self.max_weight_visibiltiy = {}
+        self.max_weight_visibility = {}
         self.viewpoints = {}
         self.current_window = []
         self.initialized = not self.monocular
@@ -140,7 +140,7 @@ class BackEnd(mp.Process):
                 self.gaussians.optimizer.zero_grad(set_to_none=True)
 
         self.occ_aware_visibility[cur_frame_idx] = (n_touched > 0).long()
-        self.max_weight_visibiltiy[cur_frame_idx] = (max_weight_mask >= 5).long()
+        self.max_weight_visibility[cur_frame_idx] = (max_weight_mask >= 5).long()
         Log("Initialized map")
         return render_pkg
 
@@ -246,7 +246,7 @@ class BackEnd(mp.Process):
             ## Deinsifying / Pruning Gaussians
             with torch.no_grad():
                 self.occ_aware_visibility = {}
-                self.max_weight_visibiltiy = {}
+                self.max_weight_visibility = {}
                 for idx in range((len(current_window))):
                     kf_idx = current_window[idx]
                     n_touched = n_touched_acm[idx]
@@ -379,7 +379,7 @@ class BackEnd(mp.Process):
         if tag is None:
             tag = "sync_backend"
 
-        msg = [tag, clone_obj(self.gaussians), self.occ_aware_visibility, keyframes, self.max_weight_visibiltiy]
+        msg = [tag, clone_obj(self.gaussians), self.occ_aware_visibility, keyframes, self.max_weight_visibility]
         self.frontend_queue.put(msg)
 
     def run(self):

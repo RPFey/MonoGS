@@ -305,9 +305,9 @@ class FrontEnd(mp.Process):
             ).count_nonzero()
             denom = min(
                 cur_weight_visibility.count_nonzero(),
-                weight_visibility.count_nonzero()
+                weight_visibility[other_idx].count_nonzero()
             )
-            point_ratio_2 = intersectoin/denom
+            point_ratio_2 = intersection/denom
             if point_ratio_2 >= 0.5:
                 new_window.append(other_idx)
             if len(new_window) == lim:
