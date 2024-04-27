@@ -1,10 +1,11 @@
 import time
-
+import os
 import numpy as np
 import torch
 import torch.multiprocessing as mp
 
 from gaussian_splatting.gaussian_renderer import render
+from gaussian_splatting.scene.gaussian_model import GaussianModel
 from gaussian_splatting.utils.graphics_utils import getProjectionMatrix2, getWorld2View2
 from gui import gui_utils
 from utils.camera_utils import Camera
@@ -25,6 +26,7 @@ class FrontEnd(mp.Process):
         self.backend_queue = None
         self.q_main2vis = None
         self.q_vis2main = None
+        self.save_dir = None
 
         self.initialized = False
         self.kf_indices = []
@@ -329,6 +331,12 @@ class FrontEnd(mp.Process):
         tic = torch.cuda.Event(enable_timing=True)
         toc = torch.cuda.Event(enable_timing=True)
 
+        self.load()
+        if len(self.cameras) > 0:
+            kf_ids = list(self.cameras.keys())
+            kf_ids.sort()
+            cur_frame_idx = kf_ids[-1] + 1
+
         while True:
             if self.q_vis2main.empty():
                 if self.pause:
@@ -344,6 +352,19 @@ class FrontEnd(mp.Process):
 
             if self.frontend_queue.empty():
                 tic.record()
+
+                if self.requested_init:
+                    time.sleep(0.01)
+                    continue
+
+                if self.single_thread and self.requested_keyframe > 0:
+                    time.sleep(0.01)
+                    continue
+
+                if self.initialized and self.requested_keyframe > 0:
+                    time.sleep(0.01)
+                    continue
+
                 if cur_frame_idx >= len(self.dataset):
                     if self.save_results:
                         eval_ate(
@@ -358,18 +379,6 @@ class FrontEnd(mp.Process):
                             self.gaussians, self.save_dir, "final", final=True
                         )
                     break
-
-                if self.requested_init:
-                    time.sleep(0.01)
-                    continue
-
-                if self.single_thread and self.requested_keyframe > 0:
-                    time.sleep(0.01)
-                    continue
-
-                if not self.initialized and self.requested_keyframe > 0:
-                    time.sleep(0.01)
-                    continue
 
                 viewpoint = Camera.init_from_dataset(
                     self.dataset, cur_frame_idx, projection_matrix
@@ -439,6 +448,7 @@ class FrontEnd(mp.Process):
                         self.occ_aware_visibility,
                         self.current_window,
                     )
+                    Log(" Frontend window: ", self.current_window)
                     if self.monocular and not self.initialized and removed is not None:
                         self.reset = True
                         Log(
@@ -494,3 +504,31 @@ class FrontEnd(mp.Process):
                 elif data[0] == "stop":
                     Log("Frontend Stopped.")
                     break
+
+    def load(self):
+        # retrieve backend state
+        import glob
+        backend_states = glob.glob(os.path.join(self.save_dir, "backend_state*"))
+        if len(backend_states) == 0:
+            return
+    
+        backend_states.sort(key=lambda x: int(x.split("_")[-1].split(".")[0]))
+
+        latest_backend = backend_states[-1]
+        timestep = int(latest_backend.split("_")[-1].split(".")[0])
+
+        gaussian_ply = os.path.join(self.save_dir, f"backend_{timestep}.ply")
+        self.gaussians.load_ply(gaussian_ply)
+
+        # load states
+        states = torch.load(latest_backend)
+        self.cameras = states["viewpoints"]
+        self.current_window = states["current_window"]
+        self.occ_aware_visibility = states["occ_aware_visibility"]
+
+        self.initialized = True
+        self.reset = False
+
+        self.kf_indices = list(self.cameras.keys())
+        self.kf_indices.sort()
+

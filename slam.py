@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import numpy as np
 from argparse import ArgumentParser
 from datetime import datetime
 
@@ -73,6 +74,7 @@ class SLAM:
         self.backend = BackEnd(self.config)
 
         self.frontend.dataset = self.dataset
+        self.frontend.gaussians = self.gaussians
         self.frontend.background = self.background
         self.frontend.pipeline_params = self.pipeline_params
         self.frontend.frontend_queue = frontend_queue
@@ -80,6 +82,7 @@ class SLAM:
         self.frontend.q_main2vis = q_main2vis
         self.frontend.q_vis2main = q_vis2main
         self.frontend.set_hyperparams()
+        self.frontend.save_dir = save_dir
 
         self.backend.gaussians = self.gaussians
         self.backend.background = self.background
@@ -89,8 +92,9 @@ class SLAM:
         self.backend.frontend_queue = frontend_queue
         self.backend.backend_queue = backend_queue
         self.backend.live_mode = self.live_mode
-
+    
         self.backend.set_hyperparams()
+        self.backend.save_dir = save_dir
 
         self.params_gui = gui_utils.ParamsGUI(
             pipe=self.pipeline_params,
