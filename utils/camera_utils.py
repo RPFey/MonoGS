@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+import numpy as np
 
 from gaussian_splatting.utils.graphics_utils import getProjectionMatrix2, getWorld2View2
 from utils.slam_utils import image_gradient, image_gradient_mask
@@ -37,6 +38,9 @@ class Camera(nn.Module):
         self.depth = depth
         self.grad_mask = None
 
+        # distortion parameters
+        self.dist_coeffs = np.zeros((5,))
+
         self.fx = fx
         self.fy = fy
         self.cx = cx
@@ -62,10 +66,12 @@ class Camera(nn.Module):
 
         self.projection_matrix = projection_matrix.to(device=device)
 
+        self.covisibile_frame_idx = {}
+
     @staticmethod
     def init_from_dataset(dataset, idx, projection_matrix):
         gt_color, gt_depth, gt_pose = dataset[idx]
-        return Camera(
+        viewpoint = Camera(
             idx,
             gt_color,
             gt_depth,
@@ -81,6 +87,9 @@ class Camera(nn.Module):
             dataset.width,
             device=dataset.device,
         )
+
+        viewpoint.dist_coeffs = dataset.dist_coeffs.copy()
+        return viewpoint
 
     @staticmethod
     def init_from_gui(uid, T, FoVx, FoVy, fx, fy, cx, cy, H, W):

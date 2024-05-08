@@ -109,7 +109,7 @@ def eval_ate(frames, kf_ids, save_dir, iterations, final=False, monocular=False)
         label=label_evo,
         monocular=monocular,
     )
-    wandb.log({"frame_idx": latest_frame_idx, "ate": ate})
+    # wandb.log({"frame_idx": latest_frame_idx, "ate": ate})
     return ate
 
 

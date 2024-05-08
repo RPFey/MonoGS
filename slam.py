@@ -4,6 +4,7 @@ matplotlib.use('Agg')  # Use a non-interactive backend
 import os
 import sys
 import time
+import numpy as np
 from argparse import ArgumentParser
 from datetime import datetime
 
@@ -76,6 +77,7 @@ class SLAM:
         self.backend = BackEnd(self.config)
 
         self.frontend.dataset = self.dataset
+        self.frontend.gaussians = self.gaussians
         self.frontend.background = self.background
         self.frontend.pipeline_params = self.pipeline_params
         self.frontend.frontend_queue = frontend_queue
@@ -83,6 +85,7 @@ class SLAM:
         self.frontend.q_main2vis = q_main2vis
         self.frontend.q_vis2main = q_vis2main
         self.frontend.set_hyperparams()
+        self.frontend.save_dir = save_dir
 
         self.backend.gaussians = self.gaussians
         self.backend.background = self.background
@@ -92,8 +95,9 @@ class SLAM:
         self.backend.frontend_queue = frontend_queue
         self.backend.backend_queue = backend_queue
         self.backend.live_mode = self.live_mode
-
+    
         self.backend.set_hyperparams()
+        self.backend.save_dir = save_dir
 
         # self.params_gui = gui_utils.ParamsGUI(
         #     pipe=self.pipeline_params,
@@ -206,6 +210,7 @@ if __name__ == "__main__":
     parser = ArgumentParser(description="Training script parameters")
     parser.add_argument("--config", type=str)
     parser.add_argument("--eval", action="store_true")
+    parser.add_argument("--exp_name", type=str, default="tum_rgbd")
 
     args = parser.parse_args(sys.argv[1:])
 
@@ -230,11 +235,12 @@ if __name__ == "__main__":
         config["Results"]["use_wandb"] = True
 
     if config["Results"]["save_results"]:
+        config["Results"]["save_dir"] = os.path.join(config["Results"]["save_dir"], args.exp_name)
         mkdir_p(config["Results"]["save_dir"])
         current_datetime = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
         path = config["Dataset"]["dataset_path"].split("/")
         save_dir = os.path.join(
-            config["Results"]["save_dir"], path[-3] + "_" + path[-2], current_datetime
+            config["Results"]["save_dir"], path[-1], current_datetime
         )
         tmp = args.config
         tmp = tmp.split(".")[0]

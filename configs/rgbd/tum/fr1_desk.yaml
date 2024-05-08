@@ -16,3 +16,6 @@ Dataset:
     width: 640
     height: 480
     depth_scale: 5000.0
+
+Training:
+  single_thread: True

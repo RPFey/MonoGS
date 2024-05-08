@@ -34,7 +34,7 @@ Training:
   size_threshold: 20
   kf_interval: 5
   window_size: 8
-  pose_window: 3
+  pose_window: 10000
   edge_threshold: 1.1
   rgb_boundary_threshold: 0.01
   alpha: 0.9
@@ -44,6 +44,7 @@ Training:
   kf_cutoff: 0.3
   prune_mode: 'slam'
   single_thread: False
+  covi_score: 0.2
   spherical_harmonics: False
   lr:
     cam_rot_delta: 0.003
