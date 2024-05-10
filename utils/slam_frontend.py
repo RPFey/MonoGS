@@ -227,79 +227,13 @@ class FrontEnd(mp.Process):
         point_ratio_2 = intersection / union
         return (point_ratio_2 < kf_overlap and dist_check2) or dist_check
 
-    # def add_to_window(
-    #     self, cur_frame_idx, cur_frame_visibility_filter, occ_aware_visibility, window
-    # ):
-    #     print("\n Adding to window")
-    #     print("Window length:", len(window))
-    #     print(self.cameras[cur_frame_idx].T)
-    #     print(self.cameras[cur_frame_idx].R)
-    #     N_dont_touch = 2
-    #     window = [cur_frame_idx] + window
-    #     # remove frames which has little overlap with the current frame
-    #     curr_frame = self.cameras[cur_frame_idx]
-    #     to_remove = []
-    #     removed_frame = None
-    #     for i in range(N_dont_touch, len(window)):
-    #         kf_idx = window[i]
-    #         # szymkiewicz–simpson coefficient
-    #         intersection = torch.logical_and(
-    #             cur_frame_visibility_filter, occ_aware_visibility[kf_idx]
-    #         ).count_nonzero()
-    #         denom = min(
-    #             cur_frame_visibility_filter.count_nonzero(),
-    #             occ_aware_visibility[kf_idx].count_nonzero(),
-    #         )
-    #         point_ratio_2 = intersection / denom
-    #         cut_off = (
-    #             self.config["Training"]["kf_cutoff"]
-    #             if "kf_cutoff" in self.config["Training"]
-    #             else 0.4
-    #         )
-    #         if not self.initialized:
-    #             cut_off = 0.4
-    #         if point_ratio_2 <= cut_off:
-    #             to_remove.append(kf_idx)
-    #
-    #     if to_remove:
-    #         window.remove(to_remove[-1])
-    #         removed_frame = to_remove[-1]
-    #     kf_0_WC = torch.linalg.inv(getWorld2View2(curr_frame.R, curr_frame.T))
-    #
-    #     if len(window) > self.config["Training"]["window_size"]:
-    #         # we need to find the keyframe to remove...
-    #         inv_dist = []
-    #         for i in range(N_dont_touch, len(window)):
-    #             inv_dists = []
-    #             kf_i_idx = window[i]
-    #             kf_i = self.cameras[kf_i_idx]
-    #             kf_i_CW = getWorld2View2(kf_i.R, kf_i.T)
-    #             for j in range(N_dont_touch, len(window)):
-    #                 if i == j:
-    #                     continue
-    #                 kf_j_idx = window[j]
-    #                 kf_j = self.cameras[kf_j_idx]
-    #                 kf_j_WC = torch.linalg.inv(getWorld2View2(kf_j.R, kf_j.T))
-    #                 T_CiCj = kf_i_CW @ kf_j_WC
-    #                 inv_dists.append(1.0 / (torch.norm(T_CiCj[0:3, 3]) + 1e-6).item())
-    #             T_CiC0 = kf_i_CW @ kf_0_WC
-    #             k = torch.sqrt(torch.norm(T_CiC0[0:3, 3])).item()
-    #             inv_dist.append(k * sum(inv_dists))
-    #
-    #         idx = np.argmax(inv_dist)
-    #         removed_frame = window[N_dont_touch + idx]
-    #         window.remove(removed_frame)
-    #
-    #     return window, removed_frame
-
     def add_to_window(self, cur_frame_idx, cur_weight_visibility, weight_visibility, window, lim=8):
         # build a new window each time
 
-        print("Adding to Window")
-        self.all_kf.append(cur_frame_idx)
+        print("\nAdding new key frame")
         new_window = [cur_frame_idx]
-        for i in range(len(self.all_kf)-2, -1, -1):
-            other_idx = self.all_kf[i]
+        for i in range(len(window)-1, -1, -1):
+            other_idx = window[i]
             intersection = torch.logical_and(
                 cur_weight_visibility, weight_visibility[other_idx]
             ).count_nonzero()
@@ -312,6 +246,27 @@ class FrontEnd(mp.Process):
                 new_window.append(other_idx)
             if len(new_window) == lim:
                 break
+        print("Primary window:", new_window)
+
+        keys = set(weight_visibility.keys())
+        keys = keys.difference(set(new_window))
+
+        print("Available bad frames:", keys)
+        for other_idx in keys:
+            intersection = torch.logical_and(
+                cur_weight_visibility, weight_visibility[other_idx]
+            ).count_nonzero()
+            denom = min(
+                cur_weight_visibility.count_nonzero(),
+                weight_visibility[other_idx].count_nonzero()
+            )
+            point_ratio_2 = intersection/denom
+            if point_ratio_2 >= 0.5:
+                new_window.append(other_idx)
+            if len(new_window) == lim * 2:
+                break
+
+        print("Final window", new_window)
 
         return new_window, None
 

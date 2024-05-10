@@ -35,6 +35,7 @@ class BackEnd(mp.Process):
         self.occ_aware_visibility = {}
         self.max_weight_visibility = {}
         self.viewpoints = {}
+        self.bad_views = []
         self.current_window = []
         self.initialized = not self.monocular
         self.keyframe_optimizers = None
@@ -75,6 +76,7 @@ class BackEnd(mp.Process):
         self.occ_aware_visibility = {}
         self.max_weight_visibility = {}
         self.viewpoints = {}
+        self.bad_views = []
         self.current_window = []
         self.initialized = not self.monocular
         self.keyframe_optimizers = None
@@ -149,6 +151,7 @@ class BackEnd(mp.Process):
             return
 
         viewpoint_stack = [self.viewpoints[kf_idx] for kf_idx in current_window]
+        bad_viewpoint_stack = []
         random_viewpoint_stack = []
         frames_to_optimize = self.config["Training"]["pose_window"]
 
@@ -156,6 +159,8 @@ class BackEnd(mp.Process):
         for cam_idx, viewpoint in self.viewpoints.items():
             if cam_idx in current_window_set:
                 continue
+            if cam_idx in self.bad_views:
+                bad_viewpoint_stack.append(cam_idx)
             random_viewpoint_stack.append(viewpoint)
 
         for _ in range(iters):
@@ -167,10 +172,14 @@ class BackEnd(mp.Process):
             visibility_filter_acm = []
             radii_acm = []
             n_touched_acm = []
+            n_touched_bad = []
             max_weight_acm = []
+            max_weight_bad = []
 
             keyframes_opt = []
 
+            # print("\r", end="")
+            # print("Bad:", self.bad_views, end="                                                         ")
             for cam_idx in range(len(current_window)):
                 viewpoint = viewpoint_stack[cam_idx]
                 keyframes_opt.append(viewpoint)
@@ -197,15 +206,50 @@ class BackEnd(mp.Process):
                     render_pkg["max_weight_mask"],
                 )
 
-                loss_mapping += get_loss_mapping(
+                new_loss_mapping = get_loss_mapping(
                     self.config, image, depth, viewpoint, opacity
                 )
+                loss_mapping += new_loss_mapping
+                kf_idx = current_window[cam_idx]
+                if new_loss_mapping > 0.02 and kf_idx not in self.bad_views:
+                    self.bad_views.append(kf_idx)
+                if new_loss_mapping <= 0.02 and kf_idx in self.bad_views:
+                    self.bad_views.remove(kf_idx)
                 viewspace_point_tensor_acm.append(viewspace_point_tensor)
                 visibility_filter_acm.append(visibility_filter)
                 radii_acm.append(radii)
                 n_touched_acm.append(n_touched)
                 max_weight_acm.append(max_weight_mask)
 
+            for cam_idx in bad_viewpoint_stack:
+                viewpoint = self.viewpoints[cam_idx]
+                render_pkg = render(
+                    viewpoint, self.gaussians, self.pipeline_params, self.background
+                )
+                (
+                    image,
+                    viewspace_point_tensor,
+                    visibility_filter,
+                    radii,
+                    depth,
+                    opacity,
+                    n_touched,
+                    max_weight_mask,
+                ) = (
+                    render_pkg["render"],
+                    render_pkg["viewspace_points"],
+                    render_pkg["visibility_filter"],
+                    render_pkg["radii"],
+                    render_pkg["depth"],
+                    render_pkg["opacity"],
+                    render_pkg["n_touched"],
+                    render_pkg["max_weight_mask"],
+                )
+                n_touched_bad.append(n_touched)
+                max_weight_bad.append(max_weight_mask)
+
+
+            # Optimization being done on random viewpoints?
 
             for cam_idx in torch.randperm(len(random_viewpoint_stack))[:2]:
                 viewpoint = random_viewpoint_stack[cam_idx]
@@ -253,6 +297,14 @@ class BackEnd(mp.Process):
                     max_weight_mask = max_weight_acm[idx]
                     self.occ_aware_visibility[kf_idx] = (n_touched > 0).long()
                     self.max_weight_visibility[kf_idx] = (max_weight_mask >= 5).long()
+
+                for idx in range(len(bad_viewpoint_stack)):
+                    kf_idx = bad_viewpoint_stack[idx]
+                    n_touched = n_touched_bad[idx]
+                    max_weight_mask = max_weight_bad[idx]
+                    self.occ_aware_visibility[kf_idx] = (n_touched > 0).long()
+                    self.max_weight_visibility[kf_idx] = (max_weight_mask >= 5).long()
+
 
                 # # compute the visibility of the gaussians
                 # # Only prune on the last iteration and when we have full window
