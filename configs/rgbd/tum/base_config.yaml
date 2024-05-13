@@ -33,8 +33,8 @@ Training:
   gaussian_reset: 2001
   size_threshold: 20
   kf_interval: 5
-  window_size: 8
-  pose_window: 3
+  window_size: 16
+  pose_window: 16
   edge_threshold: 1.1
   rgb_boundary_threshold: 0.01
   alpha: 0.9

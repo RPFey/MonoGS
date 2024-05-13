@@ -32,6 +32,7 @@ class FrontEnd(mp.Process):
         self.iteration_count = 0
         self.occ_aware_visibility = {}
         self.max_weight_visibility = {}
+        self.first_touched_visibility = {}
         self.current_window = []
         self.all_kf = []
 
@@ -115,6 +116,7 @@ class FrontEnd(mp.Process):
         self.iteration_count = 0
         self.occ_aware_visibility = {}
         self.max_weight_visibility = {}
+        self.first_touched_visibility = {}
         self.current_window = []
         # remove everything from the queues
         while not self.backend_queue.empty():
@@ -227,7 +229,7 @@ class FrontEnd(mp.Process):
         point_ratio_2 = intersection / union
         return (point_ratio_2 < kf_overlap and dist_check2) or dist_check
 
-    def add_to_window(self, cur_frame_idx, cur_weight_visibility, weight_visibility, window, lim=8):
+    def add_to_window(self, cur_frame_idx, cur_visibility, visibility, window, lim=8):
         # build a new window each time
 
         print("\nAdding new key frame")
@@ -235,11 +237,11 @@ class FrontEnd(mp.Process):
         for i in range(len(window)-1, -1, -1):
             other_idx = window[i]
             intersection = torch.logical_and(
-                cur_weight_visibility, weight_visibility[other_idx]
+                cur_visibility, visibility[other_idx]
             ).count_nonzero()
             denom = min(
-                cur_weight_visibility.count_nonzero(),
-                weight_visibility[other_idx].count_nonzero()
+                cur_visibility.count_nonzero(),
+                visibility[other_idx].count_nonzero()
             )
             point_ratio_2 = intersection/denom
             if point_ratio_2 >= 0.5:
@@ -248,17 +250,17 @@ class FrontEnd(mp.Process):
                 break
         print("Primary window:", new_window)
 
-        keys = set(weight_visibility.keys())
+        keys = set(visibility.keys())
         keys = keys.difference(set(new_window))
 
         print("Available bad frames:", keys)
         for other_idx in keys:
             intersection = torch.logical_and(
-                cur_weight_visibility, weight_visibility[other_idx]
+                cur_visibility, visibility[other_idx]
             ).count_nonzero()
             denom = min(
-                cur_weight_visibility.count_nonzero(),
-                weight_visibility[other_idx].count_nonzero()
+                cur_visibility.count_nonzero(),
+                visibility[other_idx].count_nonzero()
             )
             point_ratio_2 = intersection/denom
             if point_ratio_2 >= 0.5:
@@ -291,6 +293,7 @@ class FrontEnd(mp.Process):
         occ_aware_visibility = data[2]
         keyframes = data[3]
         self.max_weight_visibility = data[4]
+        self.first_touched_visibility = data[5]
         self.occ_aware_visibility = occ_aware_visibility
 
         for kf_id, kf_R, kf_T in keyframes:
@@ -401,6 +404,7 @@ class FrontEnd(mp.Process):
                 check_time = (cur_frame_idx - last_keyframe_idx) >= self.kf_interval
                 curr_visibility = (render_pkg["n_touched"] > 0).long()
                 max_weight_mask = (render_pkg["max_weight_mask"] >= 5).long()
+                first_touched = (render_pkg["first_touched"] >= 5).long()
                 create_kf = self.is_keyframe(
                     cur_frame_idx,
                     last_keyframe_idx,
@@ -422,10 +426,22 @@ class FrontEnd(mp.Process):
                 if self.single_thread:
                     create_kf = check_time and create_kf
                 if create_kf:
+                    # self.current_window, removed = self.add_to_window(
+                    #     cur_frame_idx,
+                    #     curr_visibility,
+                    #     self.occ_aware_visibility,
+                    #     self.current_window,
+                    # )
+                    # self.current_window, removed = self.add_to_window(
+                    #     cur_frame_idx,
+                    #     max_weight_mask,
+                    #     self.max_weight_visibility,
+                    #     self.current_window,
+                    # )
                     self.current_window, removed = self.add_to_window(
                         cur_frame_idx,
-                        max_weight_mask,
-                        self.max_weight_visibility,
+                        first_touched,
+                        self.first_touched_visibility,
                         self.current_window,
                     )
                     if self.monocular and not self.initialized and removed is not None:
