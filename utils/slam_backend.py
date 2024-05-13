@@ -728,91 +728,119 @@ class BackEnd(mp.Process):
         query_idx = keyframe_idx[result.query]
         match_idx = keyframe_idx[result.match]
 
+        # Convert images to grayscale
+        img1 = convert_to_gray(self.viewpoints[query_idx].original_image.cpu().numpy())
+        img2 = convert_to_gray(self.viewpoints[match_idx].original_image.cpu().numpy())
+
+        # Detect and match features
+        keypoints1, keypoints2, good_matches = self.detect_and_match_features(img1, img2)
+
         # intrinsic matrix here
         K = np.array([
             [self.viewpoints[match_idx].fx, 0, self.viewpoints[match_idx].cx],
             [0, self.viewpoints[match_idx].fy, self.viewpoints[match_idx].cy],
             [0, 0, 1.]])
         
-        # maybe SIFT here
-        # query_pts = np.array([ [kp.pt.x, kp.pt.y] for kp in query_kps])
-        # match_pts = np.array([ [kp.pt.x, kp.pt.y] for kp in match_kps])
+        # # maybe SIFT here
+        # # query_pts = np.array([ [kp.pt.x, kp.pt.y] for kp in query_kps])
+        # # match_pts = np.array([ [kp.pt.x, kp.pt.y] for kp in match_kps])
 
-        def convert_to_cv_gray(tensor):
-            img = tensor.permute(1, 2, 0).cpu().numpy() * 255.
-            img = np.clip(img, 0, 255).astype(np.uint8)
-            img_gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-            return img_gray
+        # def convert_to_cv_gray(tensor):
+        #     img = tensor.permute(1, 2, 0).cpu().numpy() * 255.
+        #     img = np.clip(img, 0, 255).astype(np.uint8)
+        #     img_gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        #     return img_gray
 
-        sift = cv2.SIFT_create()
-        img1 = convert_to_cv_gray(self.viewpoints[query_idx].original_image)
-        mask = np.ones_like(img1)
-        kps1, des1 = sift.detectAndCompute(img1, mask)
+        # sift = cv2.SIFT_create()
+        # img1 = convert_to_cv_gray(self.viewpoints[query_idx].original_image)
+        # mask = np.ones_like(img1)
+        # kps1, des1 = sift.detectAndCompute(img1, mask)
 
-        img2 = convert_to_cv_gray(self.viewpoints[match_idx].original_image)
-        kps2, des2 = sift.detectAndCompute(img2, mask)
+        # img2 = convert_to_cv_gray(self.viewpoints[match_idx].original_image)
+        # kps2, des2 = sift.detectAndCompute(img2, mask)
 
-        # match
-        bf = cv2.BFMatcher()
-        matches = bf.knnMatch(des1, des2, k=2)
+        # # match
+        # bf = cv2.BFMatcher()
+        # matches = bf.knnMatch(des1, des2, k=2)
 
-        # Apply ratio test
-        good = []
-        for m, n in matches:
-            if m.distance < 0.75 * n.distance:
-                good.append(m)
+        # # Apply ratio test
+        # good = []
+        # for m, n in matches:
+        #     if m.distance < 0.75 * n.distance:
+        #         good.append(m)
 
-        query_pts = np.array([kps1[m.queryIdx].pt for m in good])
-        match_pts = np.array([kps2[m.trainIdx].pt for m in good])
+        # query_pts = np.array([kps1[m.queryIdx].pt for m in good])
+        # match_pts = np.array([kps2[m.trainIdx].pt for m in good])
 
         distCoeff = self.viewpoints[match_idx].dist_coeffs
         # p_query = R_m2q * p_match + T_m2q
         _, E, R_m2q, T_m2q, mask = cv2.recoverPose(match_pts, query_pts, K, distCoeff, K, distCoeff)
 
-        # estimate scale here
-        valid_query_points = query_pts[mask.ravel() == 1]
-        valid_match_points = match_pts[mask.ravel() == 1]
+        # # estimate scale here
+        # valid_query_points = query_pts[mask.ravel() == 1]
+        # valid_match_points = match_pts[mask.ravel() == 1]
 
-        undistorted_match_points = cv2.undistortPoints(valid_match_points, K, distCoeff)
-        undistorted_match_points = undistorted_match_points[:, 0, :]
-        undistorted_match_points = np.concatenate([undistorted_match_points, np.ones((undistorted_match_points.shape[0], 1))], axis=1)
-        undistorted_query_points = cv2.undistortPoints(valid_query_points, K, distCoeff)
-        undistorted_query_points = undistorted_query_points[:, 0, :]
-        undistorted_query_points = np.concatenate([undistorted_query_points, np.ones((undistorted_query_points.shape[0], 1))], axis=1)
+        # undistorted_match_points = cv2.undistortPoints(valid_match_points, K, distCoeff)
+        # undistorted_match_points = undistorted_match_points[:, 0, :]
+        # undistorted_match_points = np.concatenate([undistorted_match_points, np.ones((undistorted_match_points.shape[0], 1))], axis=1)
+        # undistorted_query_points = cv2.undistortPoints(valid_query_points, K, distCoeff)
+        # undistorted_query_points = undistorted_query_points[:, 0, :]
+        # undistorted_query_points = np.concatenate([undistorted_query_points, np.ones((undistorted_query_points.shape[0], 1))], axis=1)
 
-        match_scale = []
-        for match_pixel, undistorted_match, undistorted_query in zip(valid_match_points, undistorted_match_points, undistorted_query_points):
-            A = np.array([undistorted_query, - R_m2q @ undistorted_match]).T
-            scale = np.linalg.pinv(A) @ T_m2q
-            depth = self.viewpoints[match_idx].depth[int(match_pixel[1]), int(match_pixel[0])]
-            if depth > 0:   
-                match_scale.append(depth / scale[1])
+        # match_scale = []
+        # for match_pixel, undistorted_match, undistorted_query in zip(valid_match_points, undistorted_match_points, undistorted_query_points):
+        #     A = np.array([undistorted_query, - R_m2q @ undistorted_match]).T
+        #     scale = np.linalg.pinv(A) @ T_m2q
+        #     depth = self.viewpoints[match_idx].depth[int(match_pixel[1]), int(match_pixel[0])]
+        #     if depth > 0:   
+        #         match_scale.append(depth / scale[1])
 
-        print(match_scale)
-        print("Scale: ", np.median(match_scale))
-        T_m2q = T_m2q * np.median(match_scale)
+        # print(match_scale)
+        # print("Scale: ", np.median(match_scale))
+        # T_m2q = T_m2q * np.median(match_scale)
         
-        R_m2q, T_m2q = torch.from_numpy(R_m2q).float().to(self.device), torch.from_numpy(T_m2q).float().to(self.device)
-        T_m2q = T_m2q.flatten()
+        # R_m2q, T_m2q = torch.from_numpy(R_m2q).float().to(self.device), torch.from_numpy(T_m2q).float().to(self.device)
+        # T_m2q = T_m2q.flatten()
         
-        # compute GT relative pose
-        gt_R_m2q = self.viewpoints[query_idx].R_gt @ self.viewpoints[match_idx].R_gt.T
-        gt_T_m2q = self.viewpoints[query_idx].T_gt - gt_R_m2q @ self.viewpoints[match_idx].T_gt
+        # # compute GT relative pose
+        # gt_R_m2q = self.viewpoints[query_idx].R_gt @ self.viewpoints[match_idx].R_gt.T
+        # gt_T_m2q = self.viewpoints[query_idx].T_gt - gt_R_m2q @ self.viewpoints[match_idx].T_gt
 
-        gt_R_m2q, gt_T_m2q = gt_R_m2q.float(), gt_T_m2q.float()
+        # gt_R_m2q, gt_T_m2q = gt_R_m2q.float(), gt_T_m2q.float()
 
-        # current loop error
-        cur_R_m2q = self.viewpoints[query_idx].R @ self.viewpoints[match_idx].R.T
-        cur_T_m2q = self.viewpoints[query_idx].T - cur_R_m2q @ self.viewpoints[match_idx].T
+        # # current loop error
+        # cur_R_m2q = self.viewpoints[query_idx].R @ self.viewpoints[match_idx].R.T
+        # cur_T_m2q = self.viewpoints[query_idx].T - cur_R_m2q @ self.viewpoints[match_idx].T
 
-        # Calculate loop error
-        loop_trans_error = torch.linalg.norm(T_m2q - gt_T_m2q)
-        loop_rot_error = torch.arccos((torch.trace(R_m2q.T @ gt_R_m2q) - 1) / 2) * 180 / np.pi
-        Log("Loop Translation Error {} Rotation Error {}".format(loop_trans_error, loop_rot_error))
+        # # Calculate loop error
+        # loop_trans_error = torch.linalg.norm(T_m2q - gt_T_m2q)
+        # loop_rot_error = torch.arccos((torch.trace(R_m2q.T @ gt_R_m2q) - 1) / 2) * 180 / np.pi
+        # Log("Loop Translation Error {} Rotation Error {}".format(loop_trans_error, loop_rot_error))
 
-        loop_trans_error = torch.linalg.norm(cur_T_m2q - gt_T_m2q)
-        loop_rot_error = torch.arccos((torch.trace(cur_R_m2q.T @ gt_R_m2q) - 1) / 2) * 180 / np.pi
-        Log("Accumulate Translation Error {} Rotation Error {}".format(loop_trans_error, loop_rot_error))
+        # loop_trans_error = torch.linalg.norm(cur_T_m2q - gt_T_m2q)
+        # loop_rot_error = torch.arccos((torch.trace(cur_R_m2q.T @ gt_R_m2q) - 1) / 2) * 180 / np.pi
+        # Log("Accumulate Translation Error {} Rotation Error {}".format(loop_trans_error, loop_rot_error))
+        
+        # Triangulate 3D points between these two frames
+        P1 = np.eye(4)  # Assuming identity for the first camera matrix
+        P2 = np.hstack([R_m2q, T_m2q.reshape(-1, 1)])  # Use recovered pose
+        points_3d = self.triangulate_points(keypoints1, keypoints2, good_matches, P1[:3], P2)
+
+        # Solve PnP to refine the pose of the current camera
+        rvec, tvec = self.solve_pnp(points_3d, keypoints2, good_matches, K, dist_coeffs)
+
+        # Update the pose of the matched frame based on PnP results
+        R, _ = cv2.Rodrigues(rvec)
+        T = tvec.reshape(-1, 1)
+
+        # Update the global pose
+        self.viewpoints[match_idx].R = torch.from_numpy(R).float().to(self.device)
+        self.viewpoints[match_idx].T = torch.from_numpy(T).float().to(self.device)
+
+        # Log and evaluate errors as previously
+        loop_trans_error = torch.linalg.norm(T_m2q - T).item()
+        loop_rot_error = torch.arccos((torch.trace(R.T @ R_m2q) - 1) / 2) * 180 / np.pi
+        Log("Refined Loop Translation Error {} Rotation Error {}".format(loop_trans_error, loop_rot_error))
 
         cam_idx_in_loop = [idx for idx in self.viewpoints.keys() if idx <= query_idx and idx >= match_idx]
         cam_idx_in_loop.sort()
@@ -1310,3 +1338,48 @@ class BackEnd(mp.Process):
         for kf in self.kf_indices:
             viewpoint = self.viewpoints[kf]
             self.extractor.addImage(viewpoint.original_image.cpu().numpy())
+
+    def detect_and_match_features(img1, img2):
+        """Detect features using SIFT and match them with FLANN based matcher."""
+        sift = cv2.SIFT_create()
+        keypoints1, descriptors1 = sift.detectAndCompute(img1, None)
+        keypoints2, descriptors2 = sift.detectAndCompute(img2, None)
+
+        # FLANN parameters and matcher
+        FLANN_INDEX_KDTREE = 1
+        index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
+        search_params = dict(checks=50)
+        flann = cv2.FlannBasedMatcher(index_params, search_params)
+
+        matches = flann.knnMatch(descriptors1, descriptors2, k=2)
+
+        # Need to draw only good matches, so create a mask
+        good_matches = []
+        for m, n in matches:
+            if m.distance < 0.75 * n.distance:  # Ratio test as per Lowe's paper
+                good_matches.append(m)
+        return keypoints1, keypoints2, good_matches
+
+    def triangulate_points(keypoints1, keypoints2, good_matches, P1, P2):
+        """Triangulate 3D points from two views."""
+        pts1 = np.float32([keypoints1[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+        pts2 = np.float32([keypoints2[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+        points_4d = cv2.triangulatePoints(P1, P2, pts1, pts2)
+        points_3d = points_4d[:3, :] / points_4d[3, :]
+        return points_3d.T
+
+    def solve_pnp(points_3d, keypoints, good_matches, K, dist_coeffs):
+        """Solve the PnP problem using the object points and image points."""
+        object_points = points_3d
+        image_points = np.float32([keypoints[m.trainIdx].pt for m in good_matches])
+
+        _, rvec, tvec, inliers = cv2.solvePnPRansac(
+            object_points, image_points, K, dist_coeffs, flags=cv2.SOLVEPNP_ITERATIVE
+        )
+        return rvec, tvec
+
+    def convert_to_gray(img):
+        """Convert image to grayscale."""
+        return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    
