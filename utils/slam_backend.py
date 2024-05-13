@@ -463,7 +463,12 @@ class BackEnd(mp.Process):
         n_touched = render_pkg["n_touched"]
         first_touched = render_pkg["first_touched"]
         max_weight_mask = render_pkg["max_weight_mask"]
-        mask = first_touched == 0
+        if self.config["custom_params"]["covis"] == "n_touched":
+            mask = n_touched == 0
+        elif self.config["custom_params"]["covis"] == "max_weight":
+            mask = max_weight_mask == 0
+        else:
+            mask = first_touched == 0
         self.gaussians.reset_opacity_nonvisible(torch.unsqueeze(mask, 0))
 
     def run(self):

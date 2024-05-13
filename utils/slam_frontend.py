@@ -234,7 +234,7 @@ class FrontEnd(mp.Process):
 
         print("\nAdding new key frame")
         new_window = [cur_frame_idx]
-        for i in range(len(window)-1, -1, -1):
+        for i in range(len(window)):
             other_idx = window[i]
             intersection = torch.logical_and(
                 cur_visibility, visibility[other_idx]
@@ -426,24 +426,27 @@ class FrontEnd(mp.Process):
                 if self.single_thread:
                     create_kf = check_time and create_kf
                 if create_kf:
-                    # self.current_window, removed = self.add_to_window(
-                    #     cur_frame_idx,
-                    #     curr_visibility,
-                    #     self.occ_aware_visibility,
-                    #     self.current_window,
-                    # )
-                    # self.current_window, removed = self.add_to_window(
-                    #     cur_frame_idx,
-                    #     max_weight_mask,
-                    #     self.max_weight_visibility,
-                    #     self.current_window,
-                    # )
-                    self.current_window, removed = self.add_to_window(
-                        cur_frame_idx,
-                        first_touched,
-                        self.first_touched_visibility,
-                        self.current_window,
-                    )
+                    if self.config["custom_params"]["covis"] == "n_touched":
+                        self.current_window, removed = self.add_to_window(
+                            cur_frame_idx,
+                            curr_visibility,
+                            self.occ_aware_visibility,
+                            self.current_window,
+                        )
+                    elif self.config["custom_params"]["covis"] == "max_weight":
+                        self.current_window, removed = self.add_to_window(
+                            cur_frame_idx,
+                            max_weight_mask,
+                            self.max_weight_visibility,
+                            self.current_window,
+                        )
+                    else:
+                        self.current_window, removed = self.add_to_window(
+                            cur_frame_idx,
+                            first_touched,
+                            self.first_touched_visibility,
+                            self.current_window,
+                        )
                     if self.monocular and not self.initialized and removed is not None:
                         self.reset = True
                         Log(
